@@ -1,0 +1,3481 @@
+import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+from io import BytesIO
+import random
+import math # Θα χρειαστούμε τη συνάρτηση ceil (οροφή)
+
+# ----------------------------------------------------
+# Βοηθητικές Συναρτήσεις (από τον κώδικά σας, με πιθανές βελτιώσεις)
+# ----------------------------------------------------
+
+def is_mutual_friend(df, child1_name, child2_name):
+    # Εξασφάλιση ότι οι τιμές είναι συμβολοσειρές και χειρισμός NaN
+    f1_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child1_name, 'ΦΙΛΙΑ'].values
+    f2_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child2_name, 'ΦΙΛΙΑ'].values
+
+    f1 = str(f1_val[0]) if f1_val.size > 0 and pd.notna(f1_val[0]) else ""
+    f2 = str(f2_val[0]) if f2_val.size > 0 and pd.notna(f2_val[0]) else ""
+
+    friends1 = [f.strip() for f in f1.split(",") if f.strip()]
+    friends2 = [f.strip() for f in f2.split(",") if f.strip()]
+
+    return (child2_name in friends1) and (child1_name in friends2)
+
+def has_conflict(df, child1_name, child2_name):
+    # Εξασφάλιση ότι οι τιμές είναι συμβολοσειρές και χειρισμός NaN
+    c1_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child1_name, 'ΣΥΓΚΡΟΥΣΗ'].values
+    c2_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child2_name, 'ΣΥΓΚΡΟΥΣΗ'].values
+
+    c1 = str(c1_val[0]) if c1_val.size > 0 and pd.notna(c1_val[0]) else ""
+    c2 = str(c2_val[0]) if c2_val.size > 0 and pd.notna(c2_val[0]) else ""
+
+    conflicts1 = [c.strip() for c in c1.split(",") if c.strip()]
+    conflicts2 = [c.strip() for c in c2.split(",") if c.strip()]
+
+    return (child2_name in conflicts1) or (child1_name in conflicts2)
+
+# Ενημερωμένη συνάρτηση τοποθέτησης για να κρατάει και στατιστικά
+def τοποθέτηση(df_students, τμηματα_dict, class_stats_dict, μαθητης_name, τμημα_name, κλειδωμα=True):
+    # Εύρεση της γραμμής του μαθητή
+    idx = df_students.index[df_students['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == μαθητης_name].tolist()
+    if not idx:
+        st.warning(f"Προσοχή: Μαθητής '{μαθητης_name}' δεν βρέθηκε στο DataFrame.")
+        return
+
+    idx = idx[0]
+    
+    # Ενημέρωση DataFrame
+    df_students.at[idx, 'ΤΜΗΜΑ'] = τμημα_name
+    df_students.at[idx, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = κλειδωμα
+
+    # Προσθήκη μαθητή στο λεξικό τμημάτων
+    τμηματα_dict[τμημα_name].append(μαθητης_name)
+
+    # Ενημέρωση στατιστικών τμήματος
+    if τμημα_name not in class_stats_dict:
+        class_stats_dict[τμημα_name] = initialize_class_stats() # Βοηθητική συνάρτηση
+    
+    student_row = df_students.loc[idx] # Παίρνουμε την τρέχουσα σειρά του μαθητή
+
+    # Ενημέρωση πλήθους
+    class_stats_dict[τμημα_name]['count'] += 1
+
+    # Ενημέρωση χαρακτηριστικών
+    # Λίστα με τα χαρακτηριστικά που παρακολουθούμε (εκτός από ΦΙΛΙΑ, ΣΥΓΚΡΟΥΣΗ, ΟΝΟΜΑΤΕΠΩΝΥΜΟ, ΤΜΗΜΑ, ΚΛΕΙΔΩΜΕΝΟΣ)
+    characteristics = ['ΦΥΛΟ', 'ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΙΚΑΝΟΠΟΙΗΤ']
+    
+    for char in characteristics:
+        if char == 'ΦΥΛΟ':
+            if student_row[char] == 'Κ':
+                class_stats_dict[τμημα_name]['ΦΥΛΟ_Κ'] += 1
+            elif student_row[char] == 'Α':
+                class_stats_dict[τμημα_name]['ΦΥΛΟ_Α'] += 1
+        elif student_row[char] == 'Ν': # Για χαρακτηριστικά Ν/Ο
+            class_stats_dict[τμημα_name][f'{char}_Ν'] += 1
+
+
+# Βοηθητική συνάρτηση για την αρχικοποίηση των στατιστικών τμήματος
+def initialize_class_stats():
+    stats = {'count': 0, 'ΦΥΛΟ_Κ': 0, 'ΦΥΛΟ_Α': 0}
+    characteristics_N_O = ['ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΙΚΑΝΟΠΟΙΗΤ']
+    for char in characteristics_N_O:
+        stats[f'{char}_Ν'] = 0
+    return stats
+
+# Νέα βοηθητική συνάρτηση για τον έλεγχο τοποθέτησης
+def can_place(df_students, student_name, target_class_name, τμηματα_dict, class_stats_dict, max_students_per_class, all_class_names):
+    # 1. Έλεγχος μεγέθους τμήματος (να μην υπερβαίνει το max_students_per_class)
+    if class_stats_dict[target_class_name]['count'] >= max_students_per_class:
+        return False, "Το τμήμα είναι πλήρες."
+
+    # 2. Έλεγχος διαφοράς πληθυσμού (διαφορά το πολύ 1 από τα άλλα τμήματα)
+    # Προσοχή: Αυτός ο έλεγχος είναι πιο πολύπλοκος σε ένα greedy αλγόριθμο.
+    # Θα το εφαρμόσουμε ως soft constraint στην επιλογή τμήματος,
+    # αλλά εδώ ως hard constraint για να μην ξεφύγει υπερβολικά.
+    
+    # Υποθετικό πλήθος μαθητών αν τοποθετηθεί ο μαθητής
+    hypothetical_counts = {cls: stats['count'] for cls, stats in class_stats_dict.items()}
+    hypothetical_counts[target_class_name] += 1
+    
+    min_count = min(hypothetical_counts.values())
+    max_count = max(hypothetical_counts.values())
+
+    if max_count - min_count > 1:
+        # Επιτρέπουμε να προχωρήσει αν το τμήμα είναι άδειο και είναι ο πρώτος μαθητής
+        # ή αν το τμήμα είναι μικρότερο από άλλα
+        if class_stats_dict[target_class_name]['count'] == 0 and len(all_class_names) > 0: # Είναι ο πρώτος στο τμήμα
+             pass # Εδώ δεν ισχύει ο κανόνας <=1
+        elif hypothetical_counts[target_class_name] > min_count + 1 and max_count > min_count + 1:
+            # Αν η τοποθέτηση του μαθητή κάνει τη διαφορά μεγαλύτερη από 1 και δεν είναι αναγκαίο (πχ άλλα τμήματα είναι πολύ μικρότερα)
+            # Αυτό είναι ένα heuristic, μπορεί να χρειαστεί ρύθμιση.
+            return False, "Η τοποθέτηση θα χαλάσει την ισορροπία πληθυσμού (>1)."
+            
+    # 3. Έλεγχος συγκρούσεων με ήδη τοποθετημένους μαθητές στο τμήμα
+    for placed_student_name in τμηματα_dict[target_class_name]:
+        if has_conflict(df_students, student_name, placed_student_name):
+            return False, f"Σύγκρουση με μαθητή '{placed_student_name}' στο τμήμα."
+    
+    return True, "Μπορεί να τοποθετηθεί."
+
+
+# ----------------------------------------------------
+# Κύρια Συνάρτηση Κατανομής Μαθητών
+# ----------------------------------------------------
+
+def πλήρης_κατανομή(df_initial, num_classes_input, max_students_per_class_input):
+    df = df_initial.copy() # Δουλεύουμε σε αντίγραφο του DataFrame
+
+    # Αρχικοποίηση στηλών αν δεν υπάρχουν
+    if 'ΤΜΗΜΑ' not in df.columns:
+        df['ΤΜΗΜΑ'] = None
+    if 'ΚΛΕΙΔΩΜΕΝΟΣ' not in df.columns:
+        df['ΚΛΕΙΔΩΜΕΝΟΣ'] = False
+
+    num_students = len(df)
+    
+    # 1. Βήμα: Ισορροπία Πληθυσμού - Έλεγχος ελάχιστου αριθμού τμημάτων
+    min_required_classes = math.ceil(num_students / max_students_per_class_input)
+    if num_classes_input < min_required_classes:
+        st.error(f"Ο αριθμός τμημάτων ({num_classes_input}) είναι πολύ μικρός για τους {num_students} μαθητές. Χρειάζονται τουλάχιστον {min_required_classes} τμήματα με μέγιστο {max_students_per_class_input} μαθητές ανά τμήμα.")
+        return None # Επιστρέφουμε None ή κάποια ένδειξη σφάλματος
+
+    # Αρχικοποίηση δομών δεδομένων
+    τμηματα = {f'Τμήμα {i+1}': [] for i in range(num_classes_input)}
+    class_stats = {f'Τμήμα {i+1}': initialize_class_stats() for i in range(num_classes_input)}
+    all_class_names = list(τμηματα.keys()) # Λίστα με ονόματα τμημάτων
+
+    # Σημείωση: Από εδώ και πέρα, θα υλοποιηθούν τα Βήματα 2-8 με τη σειρά.
+    # Αυτό το πρώτο κομμάτι είναι η προετοιμασία.
+
+    st.write("Ξεκινάει η προηγμένη κατανομή...")
+
+    # ----- Βήμα 2: Παιδιά Εκπαιδευτικών -----
+    # Κωδικοποίηση για Βήμα 2 θα ακολουθήσει
+
+    # ----- Βήμα 3: Ζωηροί Μαθητές -----
+    # Κωδικοποίηση για Βήμα 3 θα ακολουθήσει
+
+    # ----- Βήμα 4: Παιδιά με Ιδιαιτερότητες -----
+    # Κωδικοποίηση για Βήμα 4 θα ακολουθήσει
+
+    # ----- Βήμα 5: Φίλοι Παιδιών που Τοποθετήθηκαν -----
+    # Κωδικοποίηση για Βήμα 5 θα ακολουθήσει
+
+    # ----- Βήμα 6: Φιλικές Ομάδες ανά Γνώση Ελληνικών -----
+    # Κωδικοποίηση για Βήμα 6 θα ακολουθήσει
+
+    # ----- Βήμα 7: Υπόλοιποι Μαθητές Χωρίς Φιλίες -----
+    # Κωδικοποίηση για Βήμα 7 θα ακολουθήσει
+
+    # ----- Βήμα 8: Έλεγχος Ποιοτικών Χαρακτηριστικών & Διορθώσεις -----
+    # Κωδικοποίηση για Βήμα 8 θα ακολουθήσει
+
+
+    return df
+
+# ----------------------------------------------------
+# Λοιπές συναρτήσεις (ίδιες με αυτές που παρείχατε)
+# ----------------------------------------------------
+
+def create_excel_file(df):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='Κατανομή')
+    return output.getvalue()
+
+def plot_distribution(df, column, title):
+    fig, ax = plt.subplots(figsize=(10, 6)) # Καλύτερο μέγεθος γραφήματος
+    
+    # Ensure all categories are present, even if counts are 0
+    # For 'ΦΥΛΟ', use 'Κ' and 'Α'
+    if column == 'ΦΥΛΟ':
+        categories = ['Κ', 'Α']
+    else: # For 'Ν'/'Ο' columns
+        categories = ['Ν', 'Ο']
+
+    # Unstacking might create NaNs if a category is missing in a group
+    grouped_data = df.groupby(['ΤΜΗΜΑ', column]).size().unstack(fill_value=0)
+    
+    # Reindex to ensure all categories are in the plot, even if they have 0 count
+    for cat in categories:
+        if cat not in grouped_data.columns:
+            grouped_data[cat] = 0
+
+    # Ensure column order for consistent plotting
+    grouped_data = grouped_data[categories]
+    
+    grouped_data.plot(kind='bar', stacked=True, ax=ax)
+    
+    ax.set_title(title)
+    ax.set_ylabel('Αριθμός Μαθητών')
+    ax.set_xlabel('Τμήμα')
+    plt.xticks(rotation=45, ha='right') # Περιστροφή labels
+    plt.tight_layout() # Προσαρμογή layout
+    st.pyplot(fig)
+
+# ----------------------------------------------------
+# Κύριο μέρος εφαρμογής Streamlit
+# ----------------------------------------------------
+
+# Έλεγχος Κωδικού Πρόσβασης
+st.sidebar.title("🔐 Κωδικός Πρόσβασης")
+password = st.sidebar.text_input("Εισάγετε τον κωδικό:", type="password")
+if password != "katanomi2025":
+    st.warning("Παρακαλώ εισάγετε έγκυρο κωδικό για πρόσβαση στην εφαρμογή.")
+    st.stop()
+
+# Ενεργοποίηση/Απενεργοποίηση Εφαρμογής
+enable_app = st.sidebar.checkbox("✅ Ενεργοποίηση Εφαρμογής", value=True)
+if not enable_app:
+    st.info("✋ Η εφαρμογή είναι προσωρινά απενεργοποιημένη.")
+    st.stop()
+
+
+st.title("📊 Ψηφιακή Κατανομή Μαθητών Α' Δημοτικού")
+
+uploaded_file = st.file_uploader("⬆️ Εισαγωγή Excel αρχείου μαθητών", type="xlsx")
+
+df_students = None # Ορίζουμε το df_students εκτός του if για να είναι πάντα διαθέσιμο
+
+if uploaded_file is not None:
+    df_students = pd.read_excel(uploaded_file)
+    st.success("✅ Το αρχείο φορτώθηκε επιτυχώς!")
+
+    # Εμφάνιση των πρώτων γραμμών του DataFrame για επιβεβαίωση
+    st.subheader("Προεπισκόπηση Δεδομένων:")
+    st.dataframe(df_students.head())
+
+    # Εισαγωγές χρήστη για αριθμό τμημάτων και μέγιστο πλήθος
+    st.sidebar.subheader("Ρυθμίσεις Κατανομής")
+    num_classes_input = st.sidebar.number_input("Αριθμός Τμημάτων:", min_value=1, value=3, step=1)
+    max_students_per_class_input = st.sidebar.number_input("Μέγιστος αριθμός μαθητών ανά τμήμα:", min_value=10, max_value=30, value=25, step=1)
+
+
+    if st.button("▶️ Εκτέλεση Κατανομής Μαθητών"):
+        # Κλήση της ενημερωμένης συνάρτησης κατανομής με τις εισόδους του χρήστη
+        df_katanomi = πλήρης_κατανομή(df_students.copy(), num_classes_input, max_students_per_class_input)
+        if df_katanomi is not None: # Ελέγχουμε αν η κατανομή ήταν επιτυχής
+            st.session_state["df_katanomi"] = df_katanomi
+            st.success("✅ Ολοκληρώθηκε η κατανομή μαθητών!")
+        else:
+            # Η πλήρης_κατανομή έχει ήδη εμφανίσει μήνυμα λάθους
+            pass
+
+# Εμφάνιση αποτελεσμάτων μόνο αν υπάρχει κατανομή στο session_state
+if "df_katanomi" in st.session_state and st.session_state["df_katanomi"] is not None:
+    df_result = st.session_state["df_katanomi"]
+
+    st.subheader("📊 Αποτελέσματα Κατανομής")
+    st.dataframe(df_result) # Εμφανίζει ολόκληρο το DataFrame με τα τμήματα
+
+    if st.button("⬇️ Λήψη Excel με Κατανομή"):
+        excel_bytes = create_excel_file(df_result)
+        st.download_button(
+            label="⬇️ Κατέβασε το αρχείο Excel",
+            data=excel_bytes,
+            file_name="katanomi.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    
+    st.subheader("📊 Πίνακας Στατιστικών Κατανομής")
+    # Χρησιμοποιούμε το df_result για τα στατιστικά
+    if 'ΤΜΗΜΑ' in df_result.columns and not df_result['ΤΜΗΜΑ'].isnull().all():
+        characteristics_for_stats = ['ΦΥΛΟ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΙΚΑΝΟΠΟΙΗΤ']
+        
+        # Μετατροπή "Ο" σε False και "Ν" σε True για αριθμητικό sum
+        df_stats = df_result.copy()
+        for col in characteristics_for_stats:
+            if col != 'ΦΥΛΟ': # Το φύλο έχει 'Κ'/'Α', όχι 'Ν'/'Ο'
+                df_stats[col] = df_stats[col].apply(lambda x: True if x == 'Ν' else False)
+
+        # Ειδικός χειρισμός για το ΦΥΛΟ
+        female_counts = df_stats[df_stats['ΦΥΛΟ'] == 'Κ'].groupby('ΤΜΗΜΑ').size().reindex(df_result['ΤΜΗΜΑ'].unique(), fill_value=0)
+        male_counts = df_stats[df_stats['ΦΥΛΟ'] == 'Α'].groupby('ΤΜΗΜΑ').size().reindex(df_result['ΤΜΗΜΑ'].unique(), fill_value=0)
+
+        stats_table = pd.DataFrame({
+            'Σύνολο Μαθητών': df_result.groupby('ΤΜΗΜΑ').size().reindex(df_result['ΤΜΗΜΑ'].unique(), fill_value=0),
+            'Κορίτσια': female_counts,
+            'Αγόρια': male_counts,
+        })
+        
+        for col in characteristics_for_stats:
+            if col != 'ΦΥΛΟ':
+                # Sum True (δηλαδή 'Ν' αρχικά)
+                stats_table[f'{col} (Ναι)'] = df_stats.groupby('ΤΜΗΜΑ')[col].sum().reindex(df_result['ΤΜΗΜΑ'].unique(), fill_value=0)
+        
+        st.dataframe(stats_table)
+    else:
+        st.info("Δεν έχουν τοποθετηθεί μαθητές σε τμήματα ακόμα για στατιστικά.")
+
+    st.subheader("📈 Ραβδογράμματα Κατανομής")
+    επιλογη = st.radio("Επιλέξτε τύπο γραφήματος:", ["Συγκεντρωτικά", "Ξεχωριστά ανά κατηγορία"])
+
+    plot_columns = ['ΦΥΛΟ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΙΚΑΝΟΠΟΙΗΤ'] # Χρησιμοποιούμε ΙΚΑΝΟΠΟΙΗΤ
+    plot_titles = {
+        'ΦΥΛΟ': 'Κατανομή Φύλου',
+        'ΖΩΗΡΟΣ': 'Κατανομή Ζωηρών Μαθητών',
+        'ΙΔΙΑΙΤΕΡΟΤΗΤΑ': 'Κατανομή Ιδιαιτεροτήτων',
+        'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ': 'Κατανομή Καλής Γνώσης Ελληνικών',
+        'ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ': 'Κατανομή Παιδιών Εκπαιδευτικών',
+        'ΙΚΑΝΟΠΟΙΗΤ': 'Κατανομή Ικανοποιητικής Μαθησιακής Ικανότητας'
+    }
+
+    if επιλογη == "Συγκεντρωτικά":
+        for col in plot_columns:
+            if col in df_result.columns: # Έλεγχος αν υπάρχει η στήλη
+                plot_distribution(df_result, col, plot_titles.get(col, f"Κατανομή βάσει {col}"))
+            else:
+                st.warning(f"Η στήλη '{col}' δεν βρέθηκε στο αρχείο σας για γραφήματα.")
+    else: # Ξεχωριστά ανά κατηγορία
+        for col in plot_columns:
+            if col in df_result.columns: # Έλεγχος αν υπάρχει η στήλη
+                plot_distribution(df_result, col, f"Κατανομή βάσει {col}")
+            else:
+                st.warning(f"Η στήλη '{col}' δεν βρέθηκε στο αρχείο σας για γραφήματα.")
+
+# Δήλωση Πνευματικών Δικαιωμάτων
+st.markdown("---")
+st.markdown(
+    """
+    📌 **Νομική Δήλωση**: Η χρήση της εφαρμογής επιτρέπεται μόνο με ρητή γραπτή άδεια της δημιουργού, Παναγιώτας Γιαννιτσοπούλου.
+    Όλα τα πνευματικά δικαιώματα ανήκουν στη Γιαννιτσοπούλου Παναγιώτα. Για άδεια χρήσης:
+    [yiannitsoopanayiota.katanomi@gmail.com](mailto:yiannitsoopanayiota.katanomi@gmail.com)
+    """
+)import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+from io import BytesIO
+import random
+import math
+
+# ----------------------------------------------------
+# Βοηθητικές Συναρτήσεις
+# ----------------------------------------------------
+
+def is_mutual_friend(df, child1_name, child2_name):
+    f1_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child1_name, 'ΦΙΛΙΑ'].values
+    f2_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child2_name, 'ΦΙΛΙΑ'].values
+
+    f1 = str(f1_val[0]) if f1_val.size > 0 and pd.notna(f1_val[0]) else ""
+    f2 = str(f2_val[0]) if f2_val.size > 0 and pd.notna(f2_val[0]) else ""
+
+    friends1 = [f.strip() for f in f1.split(",") if f.strip()]
+    friends2 = [f.strip() for f in f2.split(",") if f.strip()]
+
+    return (child2_name in friends1) and (child1_name in friends2)
+
+def has_conflict(df, child1_name, child2_name):
+    c1_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child1_name, 'ΣΥΓΚΡΟΥΣΗ'].values
+    c2_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child2_name, 'ΣΥΓΚΡΟΥΣΗ'].values
+
+    c1 = str(c1_val[0]) if c1_val.size > 0 and pd.notna(c1_val[0]) else ""
+    c2 = str(c2_val[0]) if c2_val.size > 0 and pd.notna(c2_val[0]) else ""
+
+    conflicts1 = [c.strip() for c in c1.split(",") if c.strip()]
+    conflicts2 = [c.strip() for c in c2.split(",") if c.strip()]
+
+    return (child2_name in conflicts1) or (child1_name in conflicts2)
+
+def initialize_class_stats():
+    stats = {'count': 0, 'ΦΥΛΟ_Κ': 0, 'ΦΥΛΟ_Α': 0}
+    characteristics_N_O = ['ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΙΚΑΝΟΠΟΙΗΤ']
+    for char in characteristics_N_O:
+        stats[f'{char}_Ν'] = 0
+    return stats
+
+def τοποθέτηση(df_students, τμηματα_dict, class_stats_dict, μαθητης_name, τμημα_name, κλειδωμα=True):
+    idx = df_students.index[df_students['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == μαθητης_name].tolist()
+    if not idx:
+        st.warning(f"Προσοχή: Μαθητής '{μαθητης_name}' δεν βρέθηκε στο DataFrame.")
+        return
+
+    idx = idx[0]
+    
+    df_students.at[idx, 'ΤΜΗΜΑ'] = τμημα_name
+    df_students.at[idx, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = κλειδωμα
+
+    τμηματα_dict[τμημα_name].append(μαθητης_name)
+
+    if τμημα_name not in class_stats_dict:
+        class_stats_dict[τμημα_name] = initialize_class_stats()
+    
+    student_row = df_students.loc[idx]
+
+    class_stats_dict[τμημα_name]['count'] += 1
+
+    characteristics = ['ΦΥΛΟ', 'ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΙΚΑΝΟΠΟΙΗΤ']
+    
+    for char in characteristics:
+        if char == 'ΦΥΛΟ':
+            if student_row[char] == 'Κ':
+                class_stats_dict[τμημα_name]['ΦΥΛΟ_Κ'] += 1
+            elif student_row[char] == 'Α':
+                class_stats_dict[τμημα_name]['ΦΥΛΟ_Α'] += 1
+        elif student_row[char] == 'Ν':
+            class_stats_dict[τμημα_name][f'{char}_Ν'] += 1
+
+def can_place(df_students, student_row, target_class_name, τμηματα_dict, class_stats_dict, max_students_per_class, all_class_names):
+    # Έλεγχος μεγέθους τμήματος
+    if class_stats_dict[target_class_name]['count'] >= max_students_per_class:
+        return False, "Το τμήμα είναι πλήρες."
+
+    # Έλεγχος διαφοράς πληθυσμού - Πιο αυστηρός έλεγχος για να διατηρηθεί η ισορροπία
+    # Υποθετικό πλήθος μαθητών αν τοποθετηθεί ο μαθητής
+    hypothetical_counts = {cls: stats['count'] for cls, stats in class_stats_dict.items()}
+    hypothetical_counts[target_class_name] += 1
+    
+    # Εξαιρούμε τμήματα που είναι ακόμα άδεια από τον έλεγχο min/max για να επιτρέψουμε την αρχική τοποθέτηση
+    non_empty_counts = [count for count in hypothetical_counts.values() if count > 0]
+    
+    if non_empty_counts: # Μόνο αν υπάρχουν μη-άδεια τμήματα
+        min_count_non_empty = min(non_empty_counts)
+        max_count_non_empty = max(non_empty_counts)
+        
+        if max_count_non_empty - min_count_non_empty > 1:
+            # Επιτρέπουμε μόνο αν το τμήμα στο οποίο προσπαθούμε να τοποθετήσουμε
+            # δεν είναι το μεγαλύτερο και η διαφορά δεν ξεπερνάει το 1
+            if hypothetical_counts[target_class_name] > min_count_non_empty + 1:
+                return False, "Η τοποθέτηση θα χαλάσει την ισορροπία πληθυσμού (>1)."
+
+    # Έλεγχος συγκρούσεων με ήδη τοποθετημένους μαθητές στο τμήμα
+    for placed_student_name in τμηματα_dict[target_class_name]:
+        if has_conflict(df_students, student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'], placed_student_name):
+            return False, f"Σύγκρουση με μαθητή '{placed_student_name}' στο τμήμα."
+    
+    return True, "Μπορεί να τοποθετηθεί."
+
+
+# ----------------------------------------------------
+# Κύρια Συνάρτηση Κατανομής Μαθητών
+# ----------------------------------------------------
+
+def πλήρης_κατανομή(df_initial, num_classes_input, max_students_per_class_input):
+    df = df_initial.copy()
+
+    if 'ΤΜΗΜΑ' not in df.columns:
+        df['ΤΜΗΜΑ'] = None
+    if 'ΚΛΕΙΔΩΜΕΝΟΣ' not in df.columns:
+        df['ΚΛΕΙΔΩΜΕΝΟΣ'] = False
+
+    num_students = len(df)
+    
+    min_required_classes = math.ceil(num_students / max_students_per_class_input)
+    if num_classes_input < min_required_classes:
+        st.error(f"Ο αριθμός τμημάτων ({num_classes_input}) είναι πολύ μικρός για τους {num_students} μαθητές. Χρειάζονται τουλάχιστον {min_required_classes} τμήματα με μέγιστο {max_students_per_class_input} μαθητές ανά τμήμα.")
+        return None
+
+    τμηματα = {f'Τμήμα {i+1}': [] for i in range(num_classes_input)}
+    class_stats = {f'Τμήμα {i+1}': initialize_class_stats() for i in range(num_classes_input)}
+    all_class_names = list(τμηματα.keys())
+    
+    st.write("Ξεκινάει η προηγμένη κατανομή...")
+
+    # Δημιουργία λίστας μη κλειδωμένων μαθητών για επεξεργασία
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True) # Ανακάτεμα για τυχαιότητα στην επιλογή
+
+    # ----- Βήμα 2: Παιδιά Εκπαιδευτικών -----
+    st.subheader("Βήμα 2: Τοποθέτηση Παιδιών Εκπαιδευτικών")
+    teacher_children = unlocked_students_df[unlocked_students_df['ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ'] == 'Ν'].copy()
+    
+    # Προσπάθεια να τοποθετήσουμε ένα παιδί εκπαιδευτικού ανά τμήμα, αν είναι εφικτό
+    current_class_idx = 0
+    for idx, student_row in teacher_children.iterrows():
+        student_name = student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ']
+        
+        # Ελέγχουμε αν ο μαθητής έχει ήδη τοποθετηθεί (πχ. αν υπάρχει σε λίστα κλειδωμένων ή στο df)
+        if df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'].iloc[0]:
+            continue # Αυτός ο μαθητής έχει ήδη τοποθετηθεί σε προηγούμενο υπο-βήμα ή λόγω φιλίας
+
+        # Βρες ένα διαθέσιμο τμήμα, ξεκινώντας από το current_class_idx
+        start_class_idx = current_class_idx
+        placed_in_step = False
+        while True:
+            target_class_name = all_class_names[current_class_idx]
+            
+            # Ελέγχουμε αν το τμήμα έχει ήδη παιδί εκπαιδευτικού
+            if class_stats[target_class_name]['ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ_Ν'] == 0:
+                is_valid, msg = can_place(df, student_row, target_class_name, τμηματα, class_stats, max_students_per_class, all_class_names)
+                if is_valid:
+                    τοποθέτηση(df, τμηματα, class_stats, student_name, target_class_name, κλειδωμα=True)
+                    st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Παιδί Εκπαιδευτικού) στο {target_class_name}.")
+                    placed_in_step = True
+                    break
+            
+            current_class_idx = (current_class_idx + 1) % num_classes_input
+            if current_class_idx == start_class_idx: # Έχουμε κάνει έναν πλήρη κύκλο
+                break # Δεν βρέθηκε τμήμα χωρίς παιδί εκπαιδευτικού ή πλήρες
+
+        if not placed_in_step: # Αν δεν τοποθετήθηκε ακόμα, προσπάθησε σε οποιοδήποτε διαθέσιμο τμήμα
+            for class_name in all_class_names:
+                is_valid, msg = can_place(df, student_row, class_name, τμηματα, class_stats, max_students_per_class, all_class_names)
+                if is_valid:
+                    τοποθέτηση(df, τμηματα, class_stats, student_name, class_name, κλειδωμα=True)
+                    st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Παιδί Εκπαιδευτικού) στο {class_name} (Αναπληρωματικό).")
+                    placed_in_step = True
+                    break
+            
+        # Ενημέρωση της λίστας των μη κλειδωμένων μαθητών αν τοποθετήθηκε
+        if placed_in_step:
+            unlocked_students_df = unlocked_students_df[unlocked_students_df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] != student_name]
+
+
+    # Χειρισμός φιλίας μεταξύ παιδιών εκπαιδευτικών και ισορροπία φύλου
+    # Αυτό είναι πιο σύνθετο και θα γίνει σε επόμενο βήμα, καθώς προϋποθέτει ζευγαρώματα/τριάδες
+    # Για τώρα, απλά τοποθετούμε μεμονωμένα τα παιδιά εκπαιδευτικών.
+    # Η λογική για "Αν υπάρχει αμοιβαία φιλία με άλλο παιδί εκπαιδευτικού, τοποθετούνται μαζί μόνο αν ο συνολικός αριθμός παιδιών εκπαιδευτικών είναι μεγαλύτερος από τον αριθμό των τμημάτων."
+    # και "Προτιμάται ισορροπία φύλου" θα αντιμετωπιστεί στην επόμενη φάση του αλγορίθμου, ίσως στο Βήμα 5 ή σε ειδικό helper.
+
+
+    # ----- Βήμα 3: Ζωηροί Μαθητές -----
+    # Κωδικοποίηση για Βήμα 3 θα ακολουθήσει
+
+    # ----- Βήμα 4: Παιδιά με Ιδιαιτερότητες -----
+    # Κωδικοποίηση για Βήμα 4 θα ακολουθήσει
+
+    # ----- Βήμα 5: Φίλοι Παιδιών που Τοποθετήθηκαν -----
+    # Κωδικοποίηση για Βήμα 5 θα ακολουθήσει
+
+    # ----- Βήμα 6: Φιλικές Ομάδες ανά Γνώση Ελληνικών -----
+    # Κωδικοποίηση για Βήμα 6 θα ακολουθήσει
+
+    # ----- Βήμα 7: Υπόλοιποι Μαθητές Χωρίς Φιλίες -----
+    # Κωδικοποίηση για Βήμα 7 θα ακολουθήσει
+
+    # ----- Βήμα 8: Έλεγχος Ποιοτικών Χαρακτηριστικών & Διορθώσεις -----
+    # Κωδικοποίηση για Βήμα 8 θα ακολουθήσει
+
+
+    return df
+
+# ----------------------------------------------------
+# Λοιπές συναρτήσεις
+# ----------------------------------------------------
+
+def create_excel_file(df):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='Κατανομή')
+    return output.getvalue()
+
+def plot_distribution(df, column, title):
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    if column == 'ΦΥΛΟ':
+        categories = ['Κ', 'Α']
+    else:
+        categories = ['Ν', 'Ο']
+
+    grouped_data = df.groupby(['ΤΜΗΜΑ', column]).size().unstack(fill_value=0)
+    
+    for cat in categories:
+        if cat not in grouped_data.columns:
+            grouped_data[cat] = 0
+
+    grouped_data = grouped_data[categories]
+    
+    grouped_data.plot(kind='bar', stacked=True, ax=ax)
+    
+    ax.set_title(title)
+    ax.set_ylabel('Αριθμός Μαθητών')
+    ax.set_xlabel('Τμήμα')
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    st.pyplot(fig)
+
+# ----------------------------------------------------
+# Κύριο μέρος εφαρμογής Streamlit
+# ----------------------------------------------------
+
+st.sidebar.title("🔐 Κωδικός Πρόσβασης")
+password = st.sidebar.text_input("Εισάγετε τον κωδικό:", type="password")
+if password != "katanomi2025":
+    st.warning("Παρακαλώ εισάγετε έγκυρο κωδικό για πρόσβαση στην εφαρμογή.")
+    st.stop()
+
+enable_app = st.sidebar.checkbox("✅ Ενεργοποίηση Εφαρμογής", value=True)
+if not enable_app:
+    st.info("✋ Η εφαρμογή είναι προσωρινά απενεργοποιημένη.")
+    st.stop()
+
+st.title("📊 Ψηφιακή Κατανομή Μαθητών Α' Δημοτικού")
+
+uploaded_file = st.file_uploader("⬆️ Εισαγωγή Excel αρχείου μαθητών", type="xlsx")
+
+df_students = None
+
+if uploaded_file is not None:
+    df_students = pd.read_excel(uploaded_file)
+    st.success("✅ Το αρχείο φορτώθηκε επιτυχώς!")
+
+    st.subheader("Προεπισκόπηση Δεδομένων:")
+    st.dataframe(df_students.head())
+
+    st.sidebar.subheader("Ρυθμίσεις Κατανομής")
+    num_classes_input = st.sidebar.number_input("Αριθμός Τμημάτων:", min_value=1, value=3, step=1)
+    max_students_per_class_input = st.sidebar.number_input("Μέγιστος αριθμός μαθητών ανά τμήμα:", min_value=10, max_value=30, value=25, step=1)
+
+    if st.button("▶️ Εκτέλεση Κατανομής Μαθητών"):
+        df_katanomi = πλήρης_κατανομή(df_students.copy(), num_classes_input, max_students_per_class_input)
+        if df_katanomi is not None:
+            st.session_state["df_katanomi"] = df_katanomi
+            st.success("✅ Ολοκληρώθηκε η κατανομή μαθητών!")
+        else:
+            pass
+
+if "df_katanomi" in st.session_state and st.session_state["df_katanomi"] is not None:
+    df_result = st.session_state["df_katanomi"]
+
+    st.subheader("📊 Αποτελέσματα Κατανομής")
+    st.dataframe(df_result)
+
+    if st.button("⬇️ Λήψη Excel με Κατανομή"):
+        excel_bytes = create_excel_file(df_result)
+        st.download_button(
+            label="⬇️ Κατέβασε το αρχείο Excel",
+            data=excel_bytes,
+            file_name="katanomi.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    
+    st.subheader("📊 Πίνακας Στατιστικών Κατανομής")
+    if 'ΤΜΗΜΑ' in df_result.columns and not df_result['ΤΜΗΜΑ'].isnull().all():
+        characteristics_for_stats = ['ΦΥΛΟ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΙΚΑΝΟΠΟΙΗΤ']
+        
+        df_stats = df_result.copy()
+        for col in characteristics_for_stats:
+            if col != 'ΦΥΛΟ':
+                df_stats[col] = df_stats[col].apply(lambda x: True if x == 'Ν' else False)
+
+        female_counts = df_stats[df_stats['ΦΥΛΟ'] == 'Κ'].groupby('ΤΜΗΜΑ').size().reindex(df_result['ΤΜΗΜΑ'].unique(), fill_value=0)
+        male_counts = df_stats[df_stats['ΦΥΛΟ'] == 'Α'].groupby('ΤΜΗΜΑ').size().reindex(df_result['ΤΜΗΜΑ'].unique(), fill_value=0)
+
+        stats_table = pd.DataFrame({
+            'Σύνολο Μαθητών': df_result.groupby('ΤΜΗΜΑ').size().reindex(df_result['ΤΜΗΜΑ'].unique(), fill_value=0),
+            'Κορίτσια': female_counts,
+            'Αγόρια': male_counts,
+        })
+        
+        for col in characteristics_for_stats:
+            if col != 'ΦΥΛΟ':
+                stats_table[f'{col} (Ναι)'] = df_stats.groupby('ΤΜΗΜΑ')[col].sum().reindex(df_result['ΤΜΗΜΑ'].unique(), fill_value=0)
+        
+        st.dataframe(stats_table)
+    else:
+        st.info("Δεν έχουν τοποθετηθεί μαθητές σε τμήματα ακόμα για στατιστικά.")
+
+    st.subheader("📈 Ραβδογράμματα Κατανομής")
+    επιλογη = st.radio("Επιλέξτε τύπο γραφήματος:", ["Συγκεντρωτικά", "Ξεχωριστά ανά κατηγορία"])
+
+    plot_columns = ['ΦΥΛΟ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΙΚΑΝΟΠΟΙΗΤ']
+    plot_titles = {
+        'ΦΥΛΟ': 'Κατανομή Φύλου',
+        'ΖΩΗΡΟΣ': 'Κατανομή Ζωηρών Μαθητών',
+        'ΙΔΙΑΙΤΕΡΟΤΗΤΑ': 'Κατανομή Ιδιαιτεροτήτων',
+        'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ': 'Κατανομή Καλής Γνώσης Ελληνικών',
+        'ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ': 'Κατανομή Παιδιών Εκπαιδευτικών',
+        'ΙΚΑΝΟΠΟΙΗΤ': 'Κατανομή Ικανοποιητικής Μαθησιακής Ικανότητας'
+    }
+
+    if επιλογη == "Συγκεντρωτικά":
+        for col in plot_columns:
+            if col in df_result.columns:
+                plot_distribution(df_result, col, plot_titles.get(col, f"Κατανομή βάσει {col}"))
+            else:
+                st.warning(f"Η στήλη '{col}' δεν βρέθηκε στο αρχείο σας για γραφήματα.")
+    else:
+        for col in plot_columns:
+            if col in df_result.columns:
+                plot_distribution(df_result, col, f"Κατανομή βάσει {col}")
+            else:
+                st.warning(f"Η στήλη '{col}' δεν βρέθηκε στο αρχείο σας για γραφήματα.")
+
+st.markdown("---")
+st.markdown(
+    """
+    📌 **Νομική Δήλωση**: Η χρήση της εφαρμογής επιτρέπεται μόνο με ρητή γραπτή άδεια της δημιουργού, Παναγιώτας Γιαννιτσοπούλου.
+    Όλα τα πνευματικά δικαιώματα ανήκουν στη Γιαννιτσοπούλου Παναγιώτα. Για άδεια χρήσης:
+    [yiannitsoopanayiota.katanomi@gmail.com](mailto:yiannitsoopanayiota.katanomi@gmail.com)
+    """
+)import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+from io import BytesIO
+import random
+import math
+
+# ----------------------------------------------------
+# Βοηθητικές Συναρτήσεις
+# ----------------------------------------------------
+
+def is_mutual_friend(df, child1_name, child2_name):
+    f1_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child1_name, 'ΦΙΛΙΑ'].values
+    f2_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child2_name, 'ΦΙΛΙΑ'].values
+
+    f1 = str(f1_val[0]) if f1_val.size > 0 and pd.notna(f1_val[0]) else ""
+    f2 = str(f2_val[0]) if f2_val.size > 0 and pd.notna(f2_val[0]) else ""
+
+    friends1 = [f.strip() for f in f1.split(",") if f.strip()]
+    friends2 = [f.strip() for f in f2.split(",") if f.strip()]
+
+    return (child2_name in friends1) and (child1_name in friends2)
+
+def has_conflict(df, child1_name, child2_name):
+    c1_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child1_name, 'ΣΥΓΚΡΟΥΣΗ'].values
+    c2_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child2_name, 'ΣΥΓΚΡΟΥΣΗ'].values
+
+    c1 = str(c1_val[0]) if c1_val.size > 0 and pd.notna(c1_val[0]) else ""
+    c2 = str(c2_val[0]) if c2_val.size > 0 and pd.notna(c2_val[0]) else ""
+
+    conflicts1 = [c.strip() for c in c1.split(",") if c.strip()]
+    conflicts2 = [c.strip() for c in c2.split(",") if c.strip()]
+
+    return (child2_name in conflicts1) or (child1_name in conflicts2)
+
+def initialize_class_stats():
+    stats = {'count': 0, 'ΦΥΛΟ_Κ': 0, 'ΦΥΛΟ_Α': 0}
+    characteristics_N_O = ['ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΙΚΑΝΟΠΟΙΗΤ']
+    for char in characteristics_N_O:
+        stats[f'{char}_Ν'] = 0
+    return stats
+
+def τοποθέτηση(df_students, τμηματα_dict, class_stats_dict, μαθητης_name, τμημα_name, κλειδωμα=True):
+    idx = df_students.index[df_students['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == μαθητης_name].tolist()
+    if not idx:
+        st.warning(f"Προσοχή: Μαθητής '{μαθητης_name}' δεν βρέθηκε στο DataFrame.")
+        return
+
+    idx = idx[0]
+    
+    df_students.at[idx, 'ΤΜΗΜΑ'] = τμημα_name
+    df_students.at[idx, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = κλειδωμα
+
+    τμηματα_dict[τμημα_name].append(μαθητης_name)
+
+    if τμημα_name not in class_stats_dict:
+        class_stats_dict[τμημα_name] = initialize_class_stats()
+    
+    student_row = df_students.loc[idx]
+
+    class_stats_dict[τμημα_name]['count'] += 1
+
+    characteristics = ['ΦΥΛΟ', 'ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΙΚΑΝΟΠΟΙΗΤ']
+    
+    for char in characteristics:
+        if char == 'ΦΥΛΟ':
+            if student_row[char] == 'Κ':
+                class_stats_dict[τμημα_name]['ΦΥΛΟ_Κ'] += 1
+            elif student_row[char] == 'Α':
+                class_stats_dict[τμημα_name]['ΦΥΛΟ_Α'] += 1
+        elif student_row[char] == 'Ν':
+            class_stats_dict[τμημα_name][f'{char}_Ν'] += 1
+
+def can_place(df_students, student_row, target_class_name, τμηματα_dict, class_stats_dict, max_students_per_class, all_class_names):
+    # Έλεγχος μεγέθους τμήματος
+    if class_stats_dict[target_class_name]['count'] >= max_students_per_class:
+        return False, "Το τμήμα είναι πλήρες."
+
+    # Έλεγχος διαφοράς πληθυσμού - Πιο αυστηρός έλεγχος για να διατηρηθεί η ισορροπία
+    hypothetical_counts = {cls: stats['count'] for cls, stats in class_stats_dict.items()}
+    hypothetical_counts[target_class_name] += 1
+    
+    non_empty_counts = [count for count in hypothetical_counts.values() if count > 0]
+    
+    if non_empty_counts:
+        min_count_non_empty = min(non_empty_counts)
+        max_count_non_empty = max(non_empty_counts)
+        
+        if max_count_non_empty - min_count_non_empty > 1:
+            if hypothetical_counts[target_class_name] > min_count_non_empty + 1:
+                return False, "Η τοποθέτηση θα χαλάσει την ισορροπία πληθυσμού (>1)."
+
+    # Έλεγχος συγκρούσεων με ήδη τοποθετημένους μαθητές στο τμήμα
+    for placed_student_name in τμηματα_dict[target_class_name]:
+        if has_conflict(df_students, student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'], placed_student_name):
+            return False, f"Σύγκρουση με μαθητή '{placed_student_name}' στο τμήμα."
+    
+    return True, "Μπορεί να τοποθετηθεί."
+
+
+# ----------------------------------------------------
+# Κύρια Συνάρτηση Κατανομής Μαθητών
+# ----------------------------------------------------
+
+def πλήρης_κατανομή(df_initial, num_classes_input, max_students_per_class_input):
+    df = df_initial.copy()
+
+    if 'ΤΜΗΜΑ' not in df.columns:
+        df['ΤΜΗΜΑ'] = None
+    if 'ΚΛΕΙΔΩΜΕΝΟΣ' not in df.columns:
+        df['ΚΛΕΙΔΩΜΕΝΟΣ'] = False
+
+    num_students = len(df)
+    
+    min_required_classes = math.ceil(num_students / max_students_per_class_input)
+    if num_classes_input < min_required_classes:
+        st.error(f"Ο αριθμός τμημάτων ({num_classes_input}) είναι πολύ μικρός για τους {num_students} μαθητές. Χρειάζονται τουλάχιστον {min_required_classes} τμήματα με μέγιστο {max_students_per_class_input} μαθητές ανά τμήμα.")
+        return None
+
+    τμηματα = {f'Τμήμα {i+1}': [] for i in range(num_classes_input)}
+    class_stats = {f'Τμήμα {i+1}': initialize_class_stats() for i in range(num_classes_input)}
+    all_class_names = list(τμηματα.keys())
+    
+    st.write("Ξεκινάει η προηγμένη κατανομή...")
+
+    # Δημιουργία λίστας μη κλειδωμένων μαθητών για επεξεργασία.
+    # Ανακατεύουμε για να αποφύγουμε την προκατάληψη από τη σειρά του αρχείου.
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+    # ----- Βήμα 2: Παιδιά Εκπαιδευτικών -----
+    st.subheader("Βήμα 2: Τοποθέτηση Παιδιών Εκπαιδευτικών")
+    teacher_children_to_place = unlocked_students_df[unlocked_students_df['ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ'] == 'Ν'].copy()
+    
+    # Προσπάθεια να τοποθετήσουμε ένα παιδί εκπαιδευτικού ανά τμήμα, αν είναι εφικτό
+    current_class_idx = 0
+    for idx, student_row in teacher_children_to_place.iterrows():
+        student_name = student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ']
+        
+        # Ελέγχουμε αν ο μαθητής έχει ήδη τοποθετηθεί
+        if df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'].iloc[0]:
+            continue
+
+        placed_in_step = False
+        # Προσπάθεια τοποθέτησης σε τμήμα χωρίς άλλο παιδί εκπαιδευτικού
+        for _ in range(num_classes_input): # Ελέγχουμε όλα τα τμήματα
+            target_class_name = all_class_names[current_class_idx]
+            
+            if class_stats[target_class_name]['ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ_Ν'] == 0:
+                is_valid, msg = can_place(df, student_row, target_class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                if is_valid:
+                    τοποθέτηση(df, τμηματα, class_stats, student_name, target_class_name, κλειδωμα=True)
+                    st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Παιδί Εκπαιδευτικού) στο {target_class_name}.")
+                    placed_in_step = True
+                    break
+            current_class_idx = (current_class_idx + 1) % num_classes_input
+
+        # Αν δεν βρέθηκε τμήμα χωρίς παιδί εκπαιδευτικού, τοποθετούμε στο πρώτο διαθέσιμο
+        if not placed_in_step:
+            for class_name in all_class_names:
+                is_valid, msg = can_place(df, student_row, class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                if is_valid:
+                    τοποθέτηση(df, τμηματα, class_stats, student_name, class_name, κλειδωμα=True)
+                    st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Παιδί Εκπαιδευτικού) στο {class_name} (Αναπληρωματικό).")
+                    placed_in_step = True
+                    break
+            
+        if placed_in_step:
+            # Ενημέρωση της λίστας μη κλειδωμένων μαθητών στον αρχικό DataFrame
+            df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = True
+
+    # Ενημέρωση unlocked_students_df μετά το Βήμα 2
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+
+    # ----- Βήμα 3: Ζωηροί Μαθητές -----
+    st.subheader("Βήμα 3: Τοποθέτηση Ζωηρών Μαθητών")
+    lively_students_to_place = unlocked_students_df[unlocked_students_df['ΖΩΗΡΟΣ'] == 'Ν'].copy()
+    
+    current_class_idx = 0
+    for idx, student_row in lively_students_to_place.iterrows():
+        student_name = student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ']
+
+        # Έλεγχος αν ο μαθητής έχει ήδη τοποθετηθεί (πχ. αν ήταν παιδί εκπαιδευτικού)
+        if df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'].iloc[0]:
+            continue
+
+        placed_in_step = False
+        # Προσπάθεια τοποθέτησης σε τμήμα με τις λιγότερες "Ζωηρούς"
+        min_lively_count = float('inf')
+        best_class_for_lively = None
+
+        # Βρες το τμήμα με τους λιγότερους ζωηρούς που μπορεί να τοποθετηθεί
+        for _ in range(num_classes_input):
+            target_class_name = all_class_names[current_class_idx]
+            
+            is_valid, msg = can_place(df, student_row, target_class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+            
+            if is_valid:
+                lively_count_in_class = class_stats[target_class_name]['ΖΩΗΡΟΣ_Ν']
+                if lively_count_in_class < min_lively_count:
+                    min_lively_count = lively_count_in_class
+                    best_class_for_lively = target_class_name
+            current_class_idx = (current_class_idx + 1) % num_classes_input
+        
+        if best_class_for_lively:
+            τοποθέτηση(df, τμηματα, class_stats, student_name, best_class_for_lively, κλειδωμα=True)
+            st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Ζωηρός) στο {best_class_for_lively}.")
+            placed_in_step = True
+        else: # Αν δεν βρέθηκε κατάλληλο τμήμα βάσει ισορροπίας, βρες το πρώτο διαθέσιμο
+            for class_name in all_class_names:
+                is_valid, msg = can_place(df, student_row, class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                if is_valid:
+                    τοποθέτηση(df, τμηματα, class_stats, student_name, class_name, κλειδωμα=True)
+                    st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Ζωηρός) στο {class_name} (Αναπληρωματικό).")
+                    placed_in_step = True
+                    break
+        
+        if placed_in_step:
+            df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = True
+
+    # Ενημέρωση unlocked_students_df μετά το Βήμα 3
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+
+    # ----- Βήμα 4: Παιimport streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+from io import BytesIO
+import random
+import math
+
+# ----------------------------------------------------
+# Βοηθητικές Συναρτήσεις
+# ----------------------------------------------------
+
+def is_mutual_friend(df, child1_name, child2_name):
+    f1_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child1_name, 'ΦΙΛΙΑ'].values
+    f2_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child2_name, 'ΦΙΛΙΑ'].values
+
+    f1 = str(f1_val[0]) if f1_val.size > 0 and pd.notna(f1_val[0]) else ""
+    f2 = str(f2_val[0]) if f2_val.size > 0 and pd.notna(f2_val[0]) else ""
+
+    friends1 = [f.strip() for f in f1.split(",") if f.strip()]
+    friends2 = [f.strip() for f in f2.split(",") if f.strip()]
+
+    return (child2_name in friends1) and (child1_name in friends2)
+
+def has_conflict(df, child1_name, child2_name):
+    c1_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child1_name, 'ΣΥΓΚΡΟΥΣΗ'].values
+    c2_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child2_name, 'ΣΥΓΚΡΟΥΣΗ'].values
+
+    c1 = str(c1_val[0]) if c1_val.size > 0 and pd.notna(c1_val[0]) else ""
+    c2 = str(c2_val[0]) if c2_val.size > 0 and pd.notna(c2_val[0]) else ""
+
+    conflicts1 = [c.strip() for c in c1.split(",") if c.strip()]
+    conflicts2 = [c.strip() for c in c2.split(",") if c.strip()]
+
+    return (child2_name in conflicts1) or (child1_name in conflicts2)
+
+def initialize_class_stats():
+    stats = {'count': 0, 'ΦΥΛΟ_Κ': 0, 'ΦΥΛΟ_Α': 0}
+    characteristics_N_O = ['ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΙΚΑΝΟΠΟΙΗΤ']
+    for char in characteristics_N_O:
+        stats[f'{char}_Ν'] = 0
+    return stats
+
+def τοποθέτηση(df_students, τμηματα_dict, class_stats_dict, μαθητης_name, τμημα_name, κλειδωμα=True):
+    idx = df_students.index[df_students['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == μαθητης_name].tolist()
+    if not idx:
+        st.warning(f"Προσοχή: Μαθητής '{μαθητης_name}' δεν βρέθηκε στο DataFrame.")
+        return
+
+    idx = idx[0]
+    
+    df_students.at[idx, 'ΤΜΗΜΑ'] = τμημα_name
+    df_students.at[idx, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = κλειδωμα
+
+    τμηματα_dict[τμημα_name].append(μαθητης_name)
+
+    if τμημα_name not in class_stats_dict:
+        class_stats_dict[τμημα_name] = initialize_class_stats()
+    
+    student_row = df_students.loc[idx]
+
+    class_stats_dict[τμημα_name]['count'] += 1
+
+    characteristics = ['ΦΥΛΟ', 'ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΙΚΑΝΟΠΟΙΗΤ']
+    
+    for char in characteristics:
+        if char == 'ΦΥΛΟ':
+            if student_row[char] == 'Κ':
+                class_stats_dict[τμημα_name]['ΦΥΛΟ_Κ'] += 1
+            elif student_row[char] == 'Α':
+                class_stats_dict[τμημα_name]['ΦΥΛΟ_Α'] += 1
+        elif student_row[char] == 'Ν':
+            class_stats_dict[τμημα_name][f'{char}_Ν'] += 1
+
+def can_place(df_students, student_row, target_class_name, τμηματα_dict, class_stats_dict, max_students_per_class, all_class_names):
+    # Έλεγχος μεγέθους τμήματος
+    if class_stats_dict[target_class_name]['count'] >= max_students_per_class:
+        return False, "Το τμήμα είναι πλήρες."
+
+    # Έλεγχος διαφοράς πληθυσμού
+    hypothetical_counts = {cls: stats['count'] for cls, stats in class_stats_dict.items()}
+    hypothetical_counts[target_class_name] += 1
+    
+    non_empty_counts = [count for count in hypothetical_counts.values() if count > 0]
+    
+    if non_empty_counts:
+        min_count_non_empty = min(non_empty_counts)
+        max_count_non_empty = max(non_empty_counts)
+        
+        if max_count_non_empty - min_count_non_empty > 1:
+            if hypothetical_counts[target_class_name] > min_count_non_empty + 1:
+                return False, "Η τοποθέτηση θα χαλάσει την ισορροπία πληθυσμού (>1)."
+
+    # Έλεγχος συγκρούσεων με ήδη τοποθετημένους μαθητές στο τμήμα
+    for placed_student_name in τμηματα_dict[target_class_name]:
+        if has_conflict(df_students, student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'], placed_student_name):
+            return False, f"Σύγκρουση με μαθητή '{placed_student_name}' στο τμήμα."
+    
+    return True, "Μπορεί να τοποθετηθεί."
+
+
+# ----------------------------------------------------
+# Κύρια Συνάρτηση Κατανομής Μαθητών
+# ----------------------------------------------------
+
+def πλήρης_κατανομή(df_initial, num_classes_input, max_students_per_class_input):
+    df = df_initial.copy()
+
+    if 'ΤΜΗΜΑ' not in df.columns:
+        df['ΤΜΗΜΑ'] = None
+    if 'ΚΛΕΙΔΩΜΕΝΟΣ' not in df.columns:
+        df['ΚΛΕΙΔΩΜΕΝΟΣ'] = False
+
+    num_students = len(df)
+    
+    min_required_classes = math.ceil(num_students / max_students_per_class_input)
+    if num_classes_input < min_required_classes:
+        st.error(f"Ο αριθμός τμημάτων ({num_classes_input}) είναι πολύ μικρός για τους {num_students} μαθητές. Χρειάζονται τουλάχιστον {min_required_classes} τμήματα με μέγιστο {max_students_per_class_input} μαθητές ανά τμήμα.")
+        return None
+
+    τμηματα = {f'Τμήμα {i+1}': [] for i in range(num_classes_input)}
+    class_stats = {f'Τμήμα {i+1}': initialize_class_stats() for i in range(num_classes_input)}
+    all_class_names = list(τμηματα.keys())
+    
+    st.write("Ξεκινάει η προηγμένη κατανομή...")
+
+    # Δημιουργία λίστας μη κλειδωμένων μαθητών για επεξεργασία.
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+    # -----import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+from io import BytesIO
+import random
+import math
+
+# ----------------------------------------------------
+# Βοηθητικές Συναρτήσεις
+# ----------------------------------------------------
+
+def is_mutual_friend(df, child1_name, child2_name):
+    f1_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child1_name, 'ΦΙΛΙΑ'].values
+    f2_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child2_name, 'ΦΙΛΙΑ'].values
+
+    f1 = str(f1_val[0]) if f1_val.size > 0 and pd.notna(f1_val[0]) else ""
+    f2 = str(f2_val[0]) if f2_val.size > 0 and pd.notna(f2_val[0]) else ""
+
+    friends1 = [f.strip() for f in f1.split(",") if f.strip()]
+    friends2 = [f.strip() for f in f2.split(",") if f.strip()]
+
+    return (child2_name in friends1) and (child1_name in friends2)
+
+def has_conflict(df, child1_name, child2_name):
+    c1_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child1_name, 'ΣΥΓΚΡΟΥΣΗ'].values
+    c2_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child2_name, 'ΣΥΓΚΡΟΥΣΗ'].values
+
+    c1 = str(c1_val[0]) if c1_val.size > 0 and pd.notna(c1_val[0]) else ""
+    c2 = str(c2_val[0]) if c2_val.size > 0 and pd.notna(c2_val[0]) else ""
+
+    conflicts1 = [c.strip() for c in c1.split(",") if c.strip()]
+    conflicts2 = [c.strip() for c in c2.split(",") if c.strip()]
+
+    return (child2_name in conflicts1) or (child1_name in conflicts2)
+
+def initialize_class_stats():
+    stats = {'count': 0, 'ΦΥΛΟ_Κ': 0, 'ΦΥΛΟ_Α': 0}
+    characteristics_N_O = ['ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΙΚΑΝΟΠΟΙΗΤ']
+    for char in characteristics_N_O:
+        stats[f'{char}_Ν'] = 0
+    return stats
+
+def τοποθέτηση(df_students, τμηματα_dict, class_stats_dict, μαθητης_name, τμημα_name, κλειδωμα=True):
+    idx = df_students.index[df_students['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == μαθητης_name].tolist()
+    if not idx:
+        st.warning(f"Προσοχή: Μαθητής '{μαθητης_name}' δεν βρέθηκε στο DataFrame.")
+        return
+
+    idx = idx[0]
+    
+    df_students.at[idx, 'ΤΜΗΜΑ'] = τμημα_name
+    df_students.at[idx, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = κλειδωμα
+
+    τμηματα_dict[τμημα_name].append(μαθητης_name)
+
+    if τμημα_name not in class_stats_dict:
+        class_stats_dict[τμημα_name] = initialize_class_stats()
+    
+    student_row = df_students.loc[idx]
+
+    class_import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+from io import BytesIO
+import random
+import math
+
+# ----------------------------------------------------
+# Βοηθητικές Συναρτήσεις
+# ----------------------------------------------------
+
+def is_mutual_friend(df, child1_name, child2_name):
+    f1_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child1_name, 'ΦΙΛΙΑ'].values
+    f2_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child2_name, 'ΦΙΛΙΑ'].values
+
+    f1 = str(f1_val[0]) if f1_val.size > 0 and pd.notna(f1_val[0]) else ""
+    f2 = str(f2_val[0]) if f2_val.size > 0 and pd.notna(f2_val[0]) else ""
+
+    friends1 = [f.strip() for f in f1.split(",") if f.strip()]
+    friends2 = [f.strip() for f in f2.split(",") if f.strip()]
+
+    return (child2_name in friends1) and (child1_name in friends2)
+
+def has_conflict(df, child1_name, child2_name):
+    c1_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child1_name, 'ΣΥΓΚΡΟΥΣΗ'].values
+    c2_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child2_name, 'ΣΥΓΚΡΟΥΣΗ'].values
+
+    c1 = str(c1_val[0]) if c1_val.size > 0 and pd.notna(c1_val[0]) else ""
+    c2 = str(c2_val[0]) if c2_val.size > 0 and pd.notna(c2_val[0]) else ""
+
+    conflicts1 = [c.strip() for c in c1.split(",") if c.strip()]
+    conflicts2 = [c.strip() for c in c2.split(",") if c.strip()]
+
+    return (child2_name in conflicts1) or (child1_name in conflicts2)
+
+def initialize_class_stats():
+    stats = {'count': 0, 'ΦΥΛΟ_Κ': 0, 'ΦΥΛΟ_Α': 0}
+    characteristics_N_O = ['ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΙΚΑΝΟΠΟΙΗΤ']
+    for char in characteristics_N_O:
+        stats[f'{char}_Ν'] = 0
+    return stats
+
+def τοποθέτηση(df_students, τμηματα_dict, class_stats_dict, μαθητης_name, τμημα_name, κλειδωμα=True):
+    idx = df_students.index[df_students['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == μαθητης_name].tolist()
+    if not idx:
+        st.warning(f"Προσοχή: Μαθητής '{μαθητης_name}' δεν βρέθηκε στο DataFrame.")
+        return
+
+    idx = idx[0]
+    
+    df_students.at[idx, 'ΤΜΗΜΑ'] = τμημα_name
+    df_students.at[idx, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = κλειδωμα
+
+    τμηματα_dict[τμημα_name].append(μαθητης_name)
+
+    if τμημα_name not in class_stats_dict:
+        class_stats_dict[τμημα_name] = initialize_class_stats()
+    
+    student_row = df_students.loc[idx]
+
+    class_stats_dict[τμημα_name]['count'] += 1
+
+    characteristics = ['ΦΥΛΟ', 'ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΙΚΑΝΟΠΟΙΗΤ']
+    
+    for char in characteristics:
+        if char == 'ΦΥΛΟ':
+            if student_row[char] == 'Κ':
+                class_stats_dict[τμημα_name]['ΦΥΛΟ_Κ'] += 1
+            elif student_row[char] == 'Α':
+                class_stats_dict[τμημα_name]['ΦΥΛΟ_Α'] += 1
+        elif student_row[char] == 'Ν':
+            class_stats_dict[τμημα_name][f'{char}_Ν'] += 1
+
+def can_place(df_students, student_row, target_class_name, τμηματα_dict, class_stats_dict, max_students_per_class, all_class_names):
+    # Έλεγχος μεγέθους τμήματος
+    if class_stats_dict[target_class_name]['count'] >= max_students_per_class:
+        return False, "Το τμήμα είναι πλήρες."
+
+    # Έλεγχος διαφοράς πληθυσμού
+    hypothetical_counts = {cls: stats['count'] for cls, stats in class_stats_dict.items()}
+    hypothetical_counts[target_class_name] += 1
+    
+    non_empty_counts = [count for count in hypothetical_counts.values() if count > 0]
+    
+    if non_empty_counts:
+        min_count_non_empty = min(non_empty_counts)
+        max_count_non_empty = max(non_empty_counts)
+        
+        if max_count_non_empty - min_count_non_empty > 1:
+            if hypothetical_counts[target_class_name] > min_count_non_empty + 1:
+                return False, "Η τοποθέτηση θα χαλάσει την ισορροπία πληθυσμού (>1)."
+
+    # Έλεγχος συγκρούσεων με ήδη τοποθετημένους μαθητές στο τμήμα
+    for placed_student_name in τμηματα_dict[target_class_name]:
+        if has_conflict(df_students, student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'], placed_student_name):
+            return False, f"Σύγκρουση με μαθητή '{placed_student_name}' στο τμήμα."
+    
+    return True, "Μπορεί να τοποθετηθεί."
+
+
+# ----------------------------------------------------
+# Κύρια Συνάρτηση Κατανομής Μαθητών
+# ----------------------------------------------------
+
+def πλήρης_κατανομή(df_initial, num_classes_input, max_students_per_class_input):
+    df = df_initial.copy()
+
+    if 'ΤΜΗΜΑ' not in df.columns:
+        df['ΤΜΗΜΑ'] = None
+    if 'ΚΛΕΙΔΩΜΕΝΟΣ' not in df.columns:
+        df['ΚΛΕΙΔΩΜΕΝΟΣ'] = False
+
+    num_students = len(df)
+    
+    min_required_classes = math.ceil(num_students / max_students_per_class_input)
+    if num_classes_input < min_required_classes:
+        st.error(f"Ο αριθμός τμημάτων ({num_classes_input}) είναι πολύ μικρός για τους {num_students} μαθητές. Χρειάζονται τουλάχιστον {min_required_classes} τμήματα με μέγιστο {max_students_per_class_input} μαθητές ανά τμήμα.")
+        return None
+
+    τμηματα = {f'Τμήμα {i+1}': [] for i in range(num_classes_input)}
+    class_stats = {f'Τμήμα {i+1}': initialize_class_stats() for i in range(num_classes_input)}
+    all_class_names = list(τμηματα.keys())
+    
+    st.write("Ξεκινάει η προηγμένη κατανομή...")
+
+    # Δημιουργία λίστας μη κλειδωμένων μαθητών για επεξεργασία.
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+    # ----- Βήμα 2: Παιδιά Εκπαιδευτικών -----
+    st.subheader("Βήμα 2: Τοποθέτηση Παιδιών Εκπαιδευτικών")
+    teacher_children_to_place = unlocked_students_df[unlocked_students_df['ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ'] == 'Ν'].copy()
+    
+    current_class_idx = 0
+    for idx, student_row in teacher_children_to_place.iterrows():
+        student_name = student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ']
+        
+        if df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'].iloc[0]:
+            continue
+
+        placed_in_step = False
+        for _ in range(num_classes_input):
+            target_class_name = all_class_names[current_class_idx]
+            
+            if class_stats[target_class_name]['ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ_Ν'] == 0:
+                is_valid, msg = can_place(df, student_row, target_class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                if is_valid:
+                    τοποθέτηση(df, τμηματα, class_stats, student_name, target_class_name, κλειδωμα=True)
+                    st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Παιδί Εκπαιδευτικού) στο {target_class_name}.")
+                    placed_in_step = True
+                    break
+            current_class_idx = (current_class_idx + 1) % num_classes_input
+
+        if not placed_in_step:
+            for class_name in all_class_names:
+                is_valid, msg = can_place(df, student_row, class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                if is_valid:
+                    τοποθέτηση(df, τμηματα, class_stats, student_name, class_name, κλειδωμα=True)
+                    st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Παιδί Εκπαιδευτικού) στο {class_name} (Αναπληρωματικό).")
+                    placed_in_step = True
+                    break
+            
+        if placed_in_step:
+            df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = True
+
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+
+    # ----- Βήμα 3: Ζωηροί Μαθητές -----
+    st.subheader("Βήμα 3: Τοποθέτηση Ζωηρών Μαθητών")
+    lively_students_to_place = unlocked_students_df[unlocked_students_df['ΖΩΗΡΟΣ'] == 'Ν'].copy()
+    
+    current_class_idx = 0
+    for idx, student_row in lively_students_to_place.iterrows():
+        student_name = student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ']
+
+        if df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'].iloc[0]:
+            continue
+
+        placed_in_step = False
+        min_lively_count = float('inf')
+        best_class_for_lively = None
+
+        for _ in range(num_classes_input):
+            target_class_name = all_class_names[current_class_idx]
+            
+            is_valid, msg = can_place(df, student_row, target_class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+            
+            if is_valid:
+                lively_count_in_class = class_stats[target_class_name]['ΖΩΗΡΟΣ_Ν']
+                if lively_count_in_class < min_lively_count:
+                    min_lively_count = lively_count_in_class
+                    best_class_for_lively = target_class_name
+            current_class_idx = (current_class_idx + 1) % num_classes_input
+        
+        if best_class_for_lively:
+            τοποθέτηση(df, τμηματα, class_stats, student_name, best_class_for_lively, κλειδωμα=True)
+            st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Ζωηρός) στο {best_class_for_lively}.")
+            placed_in_step = True
+        else:
+            for class_name in all_class_names:
+                is_valid, msg = can_place(df, student_row, class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                if is_valid:
+                    τοποθέτηση(df, τμηματα, class_stats, student_name, class_name, κλειδωμα=True)
+                    st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Ζωηρός) στο {class_name} (Αναπληρωματικό).")
+                    placed_in_step = True
+                    break
+        
+        if placed_in_step:
+            df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = True
+
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+
+    # ----- Βή 4: Παιδιά με Ιδιαιτερότητες -----
+    st.subheader("Βήμα 4: Τοποθέτηση Παιδιών με Ιδιαιτερότητες")
+    special_needs_students_to_place = unlocked_students_df[unlocked_students_df['ΙΔΙΑΙΤΕΡΟΤΗΤΑ'] == 'Ν'].copy()
+    
+    current_class_idx = 0
+    for idx, student_row in special_needs_students_to_place.iterrows():
+        student_name = student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ']
+
+        if df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'].iloc[0]:
+            continue
+
+        placed_in_step = False
+        
+        # Πρώτη προτεραιότητα: Ένας μαθητής με ιδιαιτερότητα ανά τμήμα
+        for _ in range(num_classes_input):
+            target_class_name = all_class_names[current_class_idx]
+            
+            if class_stats[target_class_name]['ΙΔΙΑΙΤΕΡΟΤΗΤΑ_Ν'] == 0:
+                is_valid, msg = can_place(df, student_row, target_class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                if is_valid:
+                    τοποθέτηση(df, τμηματα, class_stats, student_name, target_class_name, κλειδωμα=True)
+                    st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Ιδιαιτερότητα) στο {target_class_name}.")
+                    placed_in_step = True
+                    break
+            current_class_idx = (current_class_idx + 1) % num_classes_input
+
+        # Δεύτερη προτεραιότητα: Αν είναι περισσότεροι, οι επιπλέον:
+        if not placed_in_step:
+            min_lively_in_class = float('inf') # Για να βρούμε το τμήμα με τους λιγότερους ζωηρούς
+            best_class_for_special = None
+            
+            random.shuffle(all_class_names)
+            for class_name in all_class_names:
+                is_valid, msg = can_place(df, student_row, class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                if is_valid:
+                    current_lively_in_class = class_stats[class_name]['ΖΩΗΡΟΣ_Ν']
+                    if current_lively_in_class < min_lively_in_class:
+                        min_lively_in_class = current_lively_in_class
+                        best_class_for_special = class_name
+            
+            if best_class_for_special:
+                τοποθέτηση(df, τμηματα, class_stats, student_name, best_class_for_special, κλειδωμα=True)
+                st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Ιδιαιτερότητα - Επιπλέον) στο {best_class_for_special}.")
+                placed_in_step = True
+            else:
+                st.warning(f"Δεν ήταν δυνατή η τοποθέτηση του/της μαθητή/τριας '{student_name}' (Ιδιαιτερότητα) σε κανένα τμήμα.")
+
+        if placed_in_step:
+            df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = True
+
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+
+    # ----- Βήμα 5: Φίλοι Παιδιών που Τοποθετήθηκαν -----
+    st.subheader("Βήμα 5: Τοποθέτηση Φίλων Τοποθετημένων Παιδιών")
+
+    # Περνάμε από όλους τους μαθητές που ΔΕΝ έχουν τοποθετηθεί ακόμα
+    # και ελέγχουμε αν έχουν φιλία με κάποιον που ΕΧΕΙ τοποθετηθεί.
+    
+    # Δημιουργούμε μια λίστα με τους μαθητές που είναι κλειδωμένοι
+    locked_students_names = df[df['ΚΛΕΙΔΩΜΕΝΟΣ'] == True]['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'].tolist()
+
+    # Επαναλαμβάνουμε την προσπάθεια τοποθέτησης φίλων μέχρι να μην μπορούν να γίνουν άλλες τοποθετήσεις
+    # (για να καλύψουμε αλυσίδες φιλίας)
+    made_placement = True
+    while made_placement:
+        made_placement = False
+        unlocked_students_to_check = df[(df['ΚΛΕΙΔΩΜΕΝΟΣ'] == False)].copy().sample(frac=1, random_state=42) # Ανακάτεμα για τυχαιότητα
+        
+        for idx, student_row in unlocked_students_to_check.iterrows():
+            student_name = student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ']
+            
+            # Ελέγχουμε ξανά μήπως κλειδώθηκε σε προηγούμενο βρόχο
+            if df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'].iloc[0]:
+                continue
+
+            friends_list_str = str(student_row['ΦΙΛΙΑ']) if pd.notna(student_row['ΦΙΛΙΑ']) else ""
+            friends_list = [f.strip() for f in friends_list_str.split(",") if f.strip()]
+
+            for friend_name in friends_list:
+                if friend_name in locked_students_names: # Ο φίλος έχει τοποθετηθεί
+                    # Ελέγχουμε αν είναι αμοιβαία φιλία
+                    if is_mutual_friend(df, student_name, friend_name):
+                        friend_class = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == friend_name, 'ΤΜΗΜΑ'].iloc[0]
+                        
+                        if friend_class is not None: # Ο φίλος έχει τμήμα
+                            is_valid, msg = can_place(df, student_row, friend_class, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                            if is_valid:
+                                τοποθέτηση(df, τμηματα, class_stats, student_name, friend_class, κλειδωμα=True)
+                                st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' με τον/την φίλο/η '{friend_name}' στο {friend_class}.")
+                                df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = True
+                                locked_students_names.append(student_name) # Προσθέτουμε τον νέο κλειδωμένο
+                                made_placement = True
+                                break # Προχώρα στον επόμενο ξεκλείδωτο μαθητή
+            if made_placement: # Αν κάναμε τοποθέτηση, ξαναξεκινάμε τον βρόχο while για να πιάσουμε πιθανές νέες αλυσίδες
+                break 
+    
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+
+    # ----- Βήμα 6: Φιλικές Ομάδες ανά Γνώση Ελληνικών -----
+    # Κωδικοποίηση για Βήμα 6 θα ακολουθήσει
+
+    # ----- Βήμα 7: Υπόλοιποι Μαθητές Χωρίς Φιλίες -----
+    # Κωδικοποίηση για Βήμα 7 θα ακολουθήσει
+
+    # ----- Βήμα 8: Έλεγχος Ποιοτικών Χαρακτηριστικών & Διορθώσεις -----
+    # Κωδικοποίηση για Βήμα 8 θα ακολουθήσει
+
+
+    return df
+
+# ----------------------------------------------------
+# Λοιπές συναρτήσεις (παραμένουν ίδιες)
+# ----------------------------------------------------
+
+def create_excel_file(df):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='Κατανομή')
+    return output.getvalue()
+
+def plot_distribution(df, column, title):
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    if column == 'ΦΥΛΟ':
+        categories = ['Κ', 'Α']
+    else:
+        categories = ['Ν', 'Ο']
+
+    grouped_data = df.groupby(['ΤΜΗΜΑ', column]).size().unstack(fill_value=0)
+    
+    for cat in categories:
+        if cat not in grouped_data.columns:
+            grouped_data[cat] = 0
+
+    grouped_data = grouped_data[categories]
+    
+    grouped_data.plot(kind='bar', stacked=True, ax=ax)
+    
+    ax.set_title(title)
+    ax.set_ylabel('Αριθμός Μαθητών')
+    ax.set_xlabel('Τμήμα')
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    st.pyplot(fig)
+
+# ----------------------------------------------------
+# Κύριο μέρος εφαρμογής Streamlit (παραμένει ίδιο)
+# ----------------------------------------------------
+
+st.sidebar.title("🔐 Κωδικός Πρόσβασης")
+password = st.sidebar.text_input("Εισάγετε τον κωδικό:", type="password")
+if password != "katanomi2025":
+    st.warning("Παρακαλώ εισάγετε έγκυρο κωδικό για πρόσβαση στην εφαρμογή.")
+    st.stop()
+
+enable_app = st.sidebar.checkbox("✅ Ενεργοποίηση Εφαρμογής", value=True)
+if not enable_app:
+    st.info("✋ Η εφαρμογή είναι προσωρινά απενεργοποιημένη.")
+    st.stop()
+
+st.title("📊 Ψηφιακή Κατανομή Μαθητών Α' Δημοτικού")
+
+uploaded_file = st.file_uploader("⬆️ Εισαγωγή Excel αρχείου μαθητών", type="xlsx")
+
+df_students = None
+
+if uploaded_file is not None:
+    df_students = pd.read_excel(uploaded_file)
+    st.success("✅ Το αρχείο φορτώθηκε επιτυχώς!")
+
+    st.subheader("Προεπισκόπηση Δεδομένων:")
+    st.dataframe(df_students.head())
+
+    st.sidebar.subheader("Ρυθμίσεις Κατανομής")
+    num_classes_input = st.sidebar.number_input("Αριθμός Τμημάτων:", min_value=1, value=3, step=1)
+    max_students_per_class_input = st.sidebar.number_input("Μέγιστος αριθμός μαθητών ανά τμήμα:", min_value=10, max_value=30, value=25, step=1)
+
+    if st.button("▶️ Εκτέλεση Κατανομής Μαθητών"):
+        df_katanomi = πλήρης_κατανομή(df_students.copy(), num_classes_input, max_students_per_class_input)
+        if df_katanomi is not None:
+            st.session_state["df_katanomi"] = df_katanomi
+            st.success("✅ Ολοκληρώθηκε η κατανομή μαθητών!")
+        else:
+            pass
+
+if "df_katanomi" in st.session_state and st.session_state["df_katanomi"] is not None:
+    df_result = st.session_state["df_katanomi"]
+
+    st.subheader("📊 Αποτελέσματα Κατανομής")
+    st.dataframe(df_result)
+
+    if st.button("⬇️ Λήψη Excel με Κατανομή"):
+        excel_bytes = create_excel_file(df_result)
+        st.download_button(
+            label="⬇️ Κατέβασε το αρχείο Excel",
+            data=excel_bytes,
+            file_name="katanomi.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    
+    st.subheader("📊 Πίνακας Στατιστικών Κατανομής")
+    if 'ΤΜΗΜΑ' in df_result.columns and not df_result['ΤΜΗΜΑ'].isnull().all():
+        characteristics_for_stats = ['ΦΥΛΟ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΙΚΑΝΟΠΟΙΗΤ']
+        
+        df_stats = df_result.copy()
+        for col in characteristics_for_stats:
+            if col != 'ΦΥΛΟ':
+                df_stats[col] = df_stats[col].apply(lambda x: True if x == 'Ν' else False)
+
+        female_counts = df_stats[df_stats['ΦΥΛΟ'] == 'Κ'].groupby('ΤΜΗΜΑ').size().reindex(df_result['ΤΜΗΜΑ'].unique(), fill_value=0)
+        male_counts = df_stats[df_stats['ΦΥΛΟ'] == 'Α'].groupby('ΤΜΗΜΑ').size().reindex(df_result['ΤΜΗΜΑ'].unique(), fill_value=0)
+
+        stats_table = pd.DataFrame({
+            'Σύνολο Μαθητών': df_result.groupby('ΤΜΗΜΑ').size().reindex(df_result['ΤΜΗΜΑ'].unique(), fill_value=0),
+            'Κορίτσια': female_counts,
+            'Αγόρια': male_counts,
+        })
+        
+        for col in characteristics_for_stats:
+            if col != 'ΦΥΛΟ':
+                stats_table[f'{col} (Ναι)'] = df_stats.groupby('ΤΜΗΜΑ')[col].sum().reindex(df_result['ΤΜΗΜΑ'].unique(), fill_value=0)
+        
+        st.dataframe(stats_table)
+    else:
+        st.info("Δεν έχουν τοποθετηθεί μαθητές σε τμήματα ακόμα για στατιστικά.")
+
+    st.subheader("📈 Ραβδογράμματα Κατανομής")
+    επιλογη = st.radio("Επιλέξτε τύπο γραφήματος:", ["Συγκεντρωτικά", "Ξεχωριστά ανά κατηγορία"])
+
+    plot_columns = ['ΦΥΛΟ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΙΚΑΝΟΠΟΙΗΤ']
+    plot_titles = {
+        'ΦΥΛΟ': 'Κατανομή Φύλου',
+        'ΖΩΗΡΟΣ': 'Κατανομή Ζωηρών Μαθητών',
+        'ΙΔΙΑΙΤΕΡΟΤΗΤΑ': 'Κατανομή Ιδιαιτεροτήτων',
+        'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ': 'Κατανομή Καλής Γνώσης Ελληνικών',
+        'ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ': 'Κατανομή Παιδιών Εκπαιδευτικών',
+        'ΙΚΑΝΟΠΟΙΗΤ': 'Κατανομή Ικανοποιητικής Μαθησιακής Ικανότητας'
+    }
+
+    if επιλογη == "Συγκεντρωτικά":
+        for col in plot_columns:
+            if col in df_result.columns:
+                plot_distribution(df_result, col, plot_titles.get(col, f"Κατανομή βάσει {col}"))
+            else:
+                st.warning(f"Η στήλη '{col}' δεν βρέθηκε στο αρχείο σας για γραφήματα.")
+    else:
+        for col in plot_columns:
+            if col in df_result.columns:
+                plot_distribution(df_result, col, f"Κατανομή βάσει {col}")
+            else:
+                st.warning(f"Η στήλη '{col}' δεν βρέθηκε στο αρχείο σας για γραφήματα.")
+
+st.markdown("---")
+st.markdown(
+    """
+    📌 **Νομική Δήλωση**: Η χρήση της εφαρμογής επιτρέπεται μόνο με ρητή γραπτή άδεια της δημιουργού, Παναγιώτας Γιαννιτσοπούλου.
+    Όλα τα πνευματικά δικαιώματα ανήκουν στη Γιαννιτσοπούλου Παναγιώτα. Για άδεια χρήσης:
+    [yiannitsoopanayiota.katanomi@gmail.com](mailto:yiannitsoopanayiota.katanomi@gmail.com)
+    """
+)import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+from io import BytesIO
+import random
+import math
+
+# ----------------------------------------------------
+# Βοηθητικές Συναρτήσεις
+# ----------------------------------------------------
+
+def is_mutual_friend(df, child1_name, child2_name):
+    f1_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child1_name, 'ΦΙΛΙΑ'].values
+    f2_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child2_name, 'ΦΙΛΙΑ'].values
+
+    f1 = str(f1_val[0]) if f1_val.size > 0 and pd.notna(f1_val[0]) else ""
+    f2 = str(f2_val[0]) if f2_val.size > 0 and pd.notna(f2_val[0]) else ""
+
+    friends1 = [f.strip() for f in f1.split(",") if f.strip()]
+    friends2 = [f.strip() for f in f2.split(",") if f.strip()]
+
+    return (child2_name in friends1) and (child1_name in friends2)
+
+def has_conflict(df, child1_name, child2_name):
+    c1_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child1_name, 'ΣΥΓΚΡΟΥΣΗ'].values
+    c2_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child2_val, 'ΣΥΓΚΡΟΥΣΗ'].values
+
+    c1 = str(c1_val[0]) if c1_val.size > 0 and pd.notna(c1_val[0]) else ""
+    c2 = str(c2_val[0]) if c2_val.size > 0 and pd.notna(c2_val[0]) else ""
+
+    conflicts1 = [c.strip() for c in c1.split(",") if c.strip()]
+    conflicts2 = [c.strip() for c in c2.split(",") if c.strip()]
+
+    return (child2_name in conflicts1) or (child1_name in conflicts2)
+
+def initialize_class_stats():
+    stats = {'count': 0, 'ΦΥΛΟ_Κ': 0, 'ΦΥΛΟ_Α': 0}
+    characteristics_N_O = ['ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΙΚΑΝΟΠΟΙΗΤ']
+    for char in characteristics_N_O:
+        stats[f'{char}_Ν'] = 0
+    return stats
+
+def τοποθέτηση(df_students, τμηματα_dict, class_stats_dict, μαθητης_name, τμημα_name, κλειδωμα=True):
+    idx = df_students.index[df_students['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == μαθητης_name].tolist()
+    if not idx:
+        st.warning(f"Προσοχή: Μαθητής '{μαθητης_name}' δεν βρέθηκε στο DataFrame.")
+        return
+
+    idx = idx[0]
+    
+    df_students.at[idx, 'ΤΜΗΜΑ'] = τμημα_name
+    df_students.at[idx, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = κλειδωμα
+
+    τμηματα_dict[τμημα_name].append(μαθητης_name)
+
+    if τμημα_name not in class_stats_dict:
+        class_stats_dict[τμημα_name] = initialize_class_stats()
+    
+    student_row = df_students.loc[idx]
+
+    class_stats_dict[τμημα_name]['count'] += 1
+
+    characteristics = ['ΦΥΛΟ', 'ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΙΚΑΝΟΠΟΙΗΤ']
+    
+    for char in characteristics:
+        if char == 'ΦΥΛΟ':
+            if student_row[char] == 'Κ':
+                class_stats_dict[τμημα_name]['ΦΥΛΟ_Κ'] += 1
+            elif student_row[char] == 'Α':
+                class_stats_dict[τμημα_name]['ΦΥΛΟ_Α'] += 1
+        elif student_row[char] == 'Ν':
+            class_stats_dict[τμημα_name][f'{char}_Ν'] += 1
+
+def can_place(df_students, student_row, target_class_name, τμηματα_dict, class_stats_dict, max_students_per_class, all_class_names):
+    # Έλεγχος μεγέθους τμήματος
+    if class_stats_dict[target_class_name]['count'] >= max_students_per_class:
+        return False, "Το τμήμα είναι πλήρες."
+
+    # Έλεγχος διαφοράς πληθυσμού
+    hypothetical_counts = {cls: stats['count'] for cls, stats in class_stats_dict.items()}
+    hypothetical_counts[target_class_name] += 1
+    
+    non_empty_counts = [count for count in hypothetical_counts.values() if count > 0]
+    
+    if non_empty_counts:
+        min_count_non_empty = min(non_empty_counts)
+        max_count_non_empty = max(non_empty_counts)
+        
+        if max_count_non_empty - min_count_non_empty > 1:
+            if hypothetical_counts[target_class_name] > min_count_non_empty + 1:
+                return False, "Η τοποθέτηση θα χαλάσει την ισορροπία πληθυσμού (>1)."
+
+    # Έλεγχος συγκρούσεων με ήδη τοποθετημένους μαθητές στο τμήμα
+    for placed_student_name in τμηματα_dict[target_class_name]:
+        if has_conflict(df_students, student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'], placed_student_name):
+            return False, f"Σύγκρουση με μαθητή '{placed_student_name}' στο τμήμα."
+    
+    return True, "Μπορεί να τοποθετηθεί."
+
+
+# ----------------------------------------------------
+# Κύρια Συνάρτηση Κατανομής Μαθητών
+# ----------------------------------------------------
+
+def πλήρης_κατανομή(df_initial, num_classes_input, max_students_per_class_input):
+    df = df_initial.copy()
+
+    if 'ΤΜΗΜΑ' not in df.columns:
+        df['ΤΜΗΜΑ'] = None
+    if 'ΚΛΕΙΔΩΜΕΝΟΣ' not in df.columns:
+        df['ΚΛΕΙΔΩΜΕΝΟΣ'] = False
+
+    num_students = len(df)
+    
+    min_required_classes = math.ceil(num_students / max_students_per_class_input)
+    if num_classes_input < min_required_classes:
+        st.error(f"Ο αριθμός τμημάτων ({num_classes_input}) είναι πολύ μικρός για τους {num_students} μαθητές. Χρειάζονται τουλάχιστον {min_required_classes} τμήματα με μέγιστο {max_students_per_class_input} μαθητές ανά τμήμα.")
+        return None
+
+    τμηματα = {f'Τμήμα {i+1}': [] for i in range(num_classes_input)}
+    class_stats = {f'Τμήμα {i+1}': initialize_class_stats() for i in range(num_classes_input)}
+    all_class_names = list(τμηματα.keys())
+    
+    st.write("Ξεκινάει η προηγμένη κατανομή...")
+
+    # Δημιουργία λίστας μη κλειδωμένων μαθητών για επεξεργασία.
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+    # ----- Βήμα 2: Παιδιά Εκπαιδευτικών -----
+    st.subheader("Βήμα 2: Τοποθέτηση Παιδιών Εκπαιδευτικών")
+    teacher_children_to_place = unlocked_students_df[unlocked_students_df['ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ'] == 'Ν'].copy()
+    
+    current_class_idx = 0
+    for idx, student_row in teacher_children_to_place.iterrows():
+        student_name = student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ']
+        
+        if df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'].iloc[0]:
+            continue
+
+        placed_in_step = False
+        for _ in range(num_classes_input):
+            target_class_name = all_class_names[current_class_idx]
+            
+            if class_stats[target_class_name]['ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ_Ν'] == 0:
+                is_valid, msg = can_place(df, student_row, target_class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                if is_valid:
+                    τοποθέτηση(df, τμηματα, class_stats, student_name, target_class_name, κλειδωμα=True)
+                    st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Παιδί Εκπαιδευτικού) στο {target_class_name}.")
+                    placed_in_step = True
+                    break
+            current_class_idx = (current_class_idx + 1) % num_classes_input
+
+        if not placed_in_step:
+            for class_name in all_class_names:
+                is_valid, msg = can_place(df, student_row, class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                if is_valid:
+                    τοποθέτηση(df, τμηματα, class_stats, student_name, class_name, κλειδωμα=True)
+                    st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Παιδί Εκπαιδευτικού) στο {class_name} (Αναπληρωματικό).")
+                    placed_in_step = True
+                    break
+            
+        if placed_in_step:
+            df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = True
+
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+
+    # ----- Βήμα 3: Ζωηροί Μαθητές -----
+    st.subheader("Βήμα 3: Τοποθέτηση Ζωηρών Μαθητών")
+    lively_students_to_place = unlocked_students_df[unlocked_students_df['ΖΩΗΡΟΣ'] == 'Ν'].copy()
+    
+    current_class_idx = 0
+    for idx, student_row in lively_students_to_place.iterrows():
+        student_name = student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ']
+
+        if df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'].iloc[0]:
+            continue
+
+        placed_in_step = False
+        min_lively_count = float('inf')
+        best_class_for_lively = None
+
+        for _ in range(num_classes_input):
+            target_class_name = all_class_names[current_class_idx]
+            
+            is_valid, msg = can_place(df, student_row, target_class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+            
+            if is_valid:
+                lively_count_in_class = class_stats[target_class_name]['ΖΩΗΡΟΣ_Ν']
+                if lively_count_in_class < min_lively_count:
+                    min_lively_count = lively_count_in_class
+                    best_class_for_lively = target_class_name
+            current_class_idx = (current_class_idx + 1) % num_classes_input
+        
+        if best_class_for_lively:
+            τοποθέτηση(df, τμηματα, class_stats, student_name, best_class_for_lively, κλειδωμα=True)
+            st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Ζωηρός) στο {best_class_for_lively}.")
+            placed_in_step = True
+        else:
+            for class_name in all_class_names:
+                is_valid, msg = can_place(df, student_row, class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                if is_valid:
+                    τοποθέτηση(df, τμηματα, class_stats, student_name, class_name, κλειδωμα=True)
+                    st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Ζωηρός) στο {class_name} (Αναπληρωματικό).")
+                    placed_in_step = True
+                    break
+        
+        if placed_in_step:
+            df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = True
+
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+
+    # ----- Βήμα 4: Παιδιά με Ιδιαιτερότητες -----
+    st.subheader("Βήμα 4: Τοποθέτηση Παιδιών με Ιδιαιτερότητες")
+    special_needs_students_to_place = unlocked_students_df[unlocked_students_df['ΙΔΙΑΙΤΕΡΟΤΗΤΑ'] == 'Ν'].copy()
+    
+    current_class_idx = 0
+    for idx, student_row in special_needs_students_to_place.iterrows():
+        student_name = student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ']
+
+        if df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'].iloc[0]:
+            continue
+
+        placed_in_step = False
+        
+        # Πρώτη προτεραιότητα: Ένας μαθητής με ιδιαιτερότητα ανά τμήμα
+        for _ in range(num_classes_input):
+            target_class_name = all_class_names[current_class_idx]
+            
+            if class_stats[target_class_name]['ΙΔΙΑΙΤΕΡΟΤΗΤΑ_Ν'] == 0:
+                is_valid, msg = can_place(df, student_row, target_class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                if is_valid:
+                    τοποθέτηση(df, τμηματα, class_stats, student_name, target_class_name, κλειδωμα=True)
+                    st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Ιδιαιτερότητα) στο {target_class_name}.")
+                    placed_in_step = True
+                    break
+            current_class_idx = (current_class_idx + 1) % num_classes_input
+
+        # Δεύτερη προτεραιότητα: Αν είναι περισσότεροι, οι επιπλέον:
+        if not placed_in_step:
+            min_lively_in_class = float('inf') # Για να βρούμε το τμήμα με τους λιγότερους ζωηρούς
+            best_class_for_special = None
+            
+            random.shuffle(all_class_names)
+            for class_name in all_class_names:
+                is_valid, msg = can_place(df, student_row, class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                if is_valid:
+                    current_lively_in_class = class_stats[class_name]['ΖΩΗΡΟΣ_Ν']
+                    if current_lively_in_class < min_lively_in_class:
+                        min_lively_in_class = current_lively_in_class
+                        best_class_for_special = class_name
+            
+            if best_class_for_special:
+                τοποθέτηση(df, τμηματα, class_stats, student_name, best_class_for_special, κλειδωμα=True)
+                st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Ιδιαιτερότητα - Επιπλέον) στο {best_class_for_special}.")
+                placed_in_step = True
+            else:
+                st.warning(f"Δεν ήταν δυνατή η τοποθέτηση του/της μαθητή/τριας '{student_name}' (Ιδιαιτερότητα) σε κανένα τμήμα.")
+
+        if placed_in_step:
+            df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = True
+
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+
+    # ----- Βήμα 5: Φίλοι Παιδιών που Τοποθετήθηκαν -----
+    st.subheader("Βήμα 5: Τοποθέτηση Φίλων Τοποθετημένων Παιδιών")
+
+    locked_students_names = df[df['ΚΛΕΙΔΩΜΕΝΟΣ'] == True]['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'].tolist()
+
+    made_placement = True
+    while made_placement:
+        made_placement = False
+        unlocked_students_to_check = df[(df['ΚΛΕΙΔΩΜΕΝΟΣ'] == False)].copy().sample(frac=1, random_state=42)
+        
+        for idx, student_row in unlocked_students_to_check.iterrows():
+            student_name = student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ']
+            
+            if df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'].iloc[0]:
+                continue
+
+            friends_list_str = str(student_row['ΦΙΛΙΑ']) if pd.notna(student_row['ΦΙΛΙΑ']) else ""
+            friends_list = [f.strip() for f in friends_list_str.split(",") if f.strip()]
+
+            for friend_name in friends_list:
+                if friend_name in locked_students_names:
+                    if is_mutual_friend(df, student_name, friend_name):
+                        friend_class = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == friend_name, 'ΤΜΗΜΑ'].iloc[0]
+                        
+                        if friend_class is not None:
+                            is_valid, msg = can_place(df, student_row, friend_class, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                            if is_valid:
+                                τοποθέτηση(df, τμηματα, class_stats, student_name, friend_class, κλειδωμα=True)
+                                st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' με τον/την φίλο/η '{friend_name}' στο {friend_class}.")
+                                df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = True
+                                locked_students_names.append(student_name)
+                                made_placement = True
+                                break
+            if made_placement:
+                break 
+    
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+
+    # ----- Βήμα 6: Φιλικές Ομάδες ανά Γνώση Ελληνικών -----
+    st.subheader("Βήμα 6: Τοποθέτηση Φιλικών Ομάδων ανά Γνώση Ελληνικών / Ικανότητα")
+    
+    # Εντοπισμός ομάδων φίλων για κάθε κατηγορία
+    # Κατηγορία: ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ
+    greek_knowledge_students = unlocked_students_df[unlocked_students_df['ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ'] == 'Ν'].copy()
+    
+    # Κατηγορία: ΙΚΑΝΟΠΟΙΗΤ
+    satisfactory_ability_students = unlocked_students_df[unlocked_students_df['ΙΚΑΝΟΠΟΙΗΤ'] == 'Ν'].copy()
+
+    # Συνδυάζουμε τους μαθητές, δίνοντας προτεραιότητα στην καλή γνώση Ελληνικών
+    students_for_step_6 = pd.concat([
+        greek_knowledge_students, 
+        satisfactory_ability_students[~satisfactory_ability_students['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'].isin(greek_knowledge_students['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'])]
+    ]).sample(frac=1, random_state=42).reset_index(drop=True) # Ανακάτεμα
+
+    for idx, student_row in students_for_step_6.iterrows():
+        student_name = student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ']
+
+        if df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'].iloc[0]:
+            continue
+
+        placed_in_step = False
+        
+        friends_list_str = str(student_row['ΦΙΛΙΑ']) if pd.notna(student_row['ΦΙΛΙΑ']) else ""
+        friends_list = [f.strip() for f in friends_list_str.split(",") if f.strip()]
+        
+        # Εντοπίζουμε αμοιβαίους φίλους από τους μη κλειδωμένους
+        mutual_unlocked_friends = []
+        for friend_name in friends_list:
+            friend_exists = df[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == friend_name]
+            if not friend_exists.empty and friend_exists['ΚΛΕΙΔΩΜΕΝΟΣ'].iloc[0] == False:
+                if is_mutual_friend(df, student_name, friend_name):
+                    mutual_unlocked_friends.append(friend_name)
+        
+        group_to_place = [student_name] + mutual_unlocked_friends
+        
+        # Προσπάθεια τοποθέτησης της ομάδας
+        random.shuffle(all_class_names)
+        for class_name in all_class_names:
+            can_place_group = True
+            # Ελέγχουμε αν όλοι οι μαθητές της ομάδας μπορούν να τοποθετηθούν σε αυτό το τμήμα
+            temp_df = df.copy() # Χρησιμοποιούμε ένα προσωρινό df για υποθετικούς ελέγχους
+            temp_τμηματα = {k: v[:] for k, v in τμηματα.items()} # Αντίγραφο
+            temp_class_stats = {k: v.copy() for k, v in class_stats.items()} # Αντίγραφο
+            
+            for member_name in group_to_place:
+                member_row = temp_df.loc[temp_df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == member_name].iloc[0]
+                is_valid, msg = can_place(temp_df, member_row, class_name, temp_τμηματα, temp_class_stats, max_students_per_class_input, all_class_names)
+                if not is_valid:
+                    can_place_group = False
+                    break
+                # Αν είναι έγκυρο, υποθετικά τοποθετούμε για τον επόμενο έλεγχο
+                τοποθέτηση(temp_df, temp_τμηματα, temp_class_stats, member_name, class_name, κλειδωμα=False) # Μην κλειδώνεις ακόμα
+
+            if can_place_group:
+                # Αν όλη η ομάδα μπορεί να τοποθετηθεί, τοποθέτησέ τους κανονικά
+                for member_name in group_to_place:
+                    τοποθέτηση(df, τμηματα, class_stats, member_name, class_name, κλειδωμα=True)
+                    st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{member_name}' (Ομάδα) στο {class_name}.")
+                    df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == member_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = True
+                placed_in_step = True
+                break # Η ομάδα τοποθετήθηκε, προχώρησε στον επόμενο μαθητή
+
+        if not placed_in_step:
+            # Αν η ομάδα δεν μπορεί να τοποθετηθεί μαζί, προσπάθησε να τοποθετήσεις τον μαθητή μόνος του
+            random.shuffle(all_class_names)
+            for class_name in all_class_names:
+                is_valid, msg = can_place(df, student_row, class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                if is_valid:
+                    τοποθέτηση(df, τμηματα, class_stats, student_name, class_name, κλειδωμα=True)
+                    st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Μόνος) στο {class_name}.")
+                    df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = True
+                    placed_in_step = True
+                    break
+            if not placed_in_step:
+                st.warning(f"Δεν ήταν δυνατή η τοποθέτηση του/της μαθητή/τριας '{student_name}' (ομάδα/μόνος) σε κανένα τμήμα.")
+
+
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+
+    # ----- Βήμα 7: Υπόλοιποι Μαθητές Χωρίς Φιλίες -----
+    # Κωδικοποίηση για Βήμα 7 θα ακολουθήσει
+
+    # ----- Βήμα 8: Έλεγχος Ποιοτικών Χαρακτηριστικών & Διορθώσεις -----
+    # Κωδικοποίηση για Βήμα 8 θα ακολουθήσει
+
+
+    return df
+
+# ----------------------------------------------------
+# Λοιπές συναρτήσεις (παραμένουν ίδιες)
+# ----------------------------------------------------
+
+def create_excel_file(df):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='Κατανομή')
+    return output.getvalue()
+
+def plot_distribution(df, column, title):
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    if column == 'ΦΥΛΟ':
+        categories = ['Κ', 'Α']
+    else:
+        categories = ['Ν', 'Ο']
+
+    grouped_data = df.groupby(['ΤΜΗΜΑ', column]).size().unstack(fill_value=0)
+    
+    for cat in categories:
+        if cat not in grouped_data.columns:
+            grouped_data[cat] = 0
+
+    grouped_data = grouped_data[categories]
+    
+    grouped_data.plot(kind='bar', stacked=True, ax=ax)
+    
+    ax.set_title(title)
+    ax.set_ylabel('Αριθμός Μαθητών')
+    ax.set_xlabel('Τμήμα')
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    st.pyplot(fig)
+
+# ----------------------------------------------------
+# Κύριο μέρος εφαρμογής Streamlit (παραμένει ίδιο)
+# ----------------------------------------------------
+
+st.sidebar.title("🔐 Κωδικός Πρόσβασης")
+password = st.sidebar.text_input("Εισάγετε τον κωδικό:", type="password")
+if password != "katanomi2025":
+    st.warning("Παρακαλώ εισάγετε έγκυρο κωδικό για πρόσβαση στην εφαρμογή.")
+    st.stop()
+
+enable_app = st.sidebar.checkbox("✅ Ενεργοποίηση Εφαρμογής", value=True)
+if not enable_app:
+    st.info("✋ Η εφαρμογή είναι προσωρινά απενεργοποιημένη.")
+    st.stop()
+
+st.title("📊 Ψηφιακή Κατανομή Μαθητών Α' Δημοτικού")
+
+uploaded_file = st.file_uploader("⬆️ Εισαγωγή Excel αρχείου μαθητών", type="xlsx")
+
+df_students = None
+
+if uploaded_file is not None:
+    df_students = pd.read_excel(uploaded_file)
+    st.success("✅ Το αρχείο φορτώθηκε επιτυχώς!")
+
+    st.subheader("Προεπισκόπηση Δεδομένων:")
+    st.dataframe(df_students.head())
+
+    st.sidebar.subheader("Ρυθμίσεις Κατανομής")
+    num_classes_input = st.sidebar.number_input("Αριθμός Τμημάτων:", min_value=1, value=3, step=1)
+    max_students_per_class_input = st.sidebar.number_input("Μέγιστος αριθμός μαθητών ανά τμήμα:", min_value=10, max_value=30, value=25, step=1)
+
+    if st.button("▶️ Εκτέλεση Κατανομής Μαθητών"):
+        df_katanomi = πλήρης_κατανομή(df_students.copy(), num_classes_input, max_students_per_class_input)
+        if df_katanomi is not None:
+            st.session_state["df_katanomi"] = df_katanomi
+            st.success("✅ Ολοκληρώθηκε η κατανομή μαθητών!")
+        else:
+            pass
+
+if "df_katanomi" in st.session_state and st.session_state["df_katanomi"] is not None:
+    df_result = st.session_state["df_katanomi"]
+
+    st.subheader("📊 Αποτελέσματα Κατανομής")
+    st.dataframe(df_result)
+
+    if st.button("⬇️ Λήψη Excel με Κατανομή"):
+        excel_bytes = create_excel_file(df_result)
+        st.download_button(
+            label="⬇️ Κατέβασε το αρχείο Excel",
+            data=excel_bytes,
+            file_name="katanomi.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    
+    st.subheader("📊 Πίνακας Στατιστικών Κατανομής")
+    if 'ΤΜΗΜΑ' in df_result.columns and not df_result['ΤΜΗΜΑ'].isnull().all():
+        characteristics_for_stats = ['ΦΥΛΟ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΙΚΑΝΟΠΟΙΗΤ']
+        
+        df_stats = df_result.copy()
+        for col in characteristics_for_stats:
+            if col != 'ΦΥΛΟ':
+                df_stats[col] = df_stats[col].apply(lambda x: True if x == 'Ν' else False)
+
+        female_counts = df_stats[df_stats['ΦΥΛΟ'] == 'Κ'].groupby('ΤΜΗΜΑ').size().reindex(df_result['ΤΜΗΜΑ'].unique(), fill_value=0)
+        male_counts = df_stats[df_stats['ΦΥΛΟ'] == 'Α'].groupby('ΤΜΗΜΑ').size().reindex(df_result['ΤΜΗΜΑ'].unique(), fill_value=0)
+
+        stats_table = pd.DataFrame({
+            'Σύνολο Μαθητών': df_result.groupby('ΤΜΗΜΑ').size().reindex(df_result['ΤΜΗΜΑ'].unique(), fill_value=0),
+            'Κορίτσια': female_counts,
+            'Αγόρια': male_counts,
+        })
+        
+        for col in characteristics_for_stats:
+            if col != 'ΦΥΛΟ':
+                stats_table[f'{col} (Ναι)'] = df_stats.groupby('ΤΜΗΜΑ')[col].sum().reindex(df_result['ΤΜΗΜΑ'].unique(), fill_value=0)
+        
+        st.dataframe(stats_table)
+    else:
+        st.info("Δεν έχουν τοποθετηθεί μαθητές σε τμήματα ακόμα για στατιστικά.")
+
+    st.subheader("📈 Ραβδογράμματα Κατανομής")
+    επιλογη = st.radio("Επιλέξτε τύπο γραφήματος:", ["Συγκεντρωτικά", "Ξεχωριστά ανά κατηγορία"])
+
+    plot_columns = ['ΦΥΛΟ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΙΚΑΝΟΠΟΙΗΤ']
+    plot_titles = {
+        'ΦΥΛΟ': 'Κατανομή Φύλου',
+        'ΖΩΗΡΟΣ': 'Κατανομή Ζωηρών Μαθητών',
+        'ΙΔΙΑΙΤΕΡΟΤΗΤΑ': 'Κατανομή Ιδιαιτεροτήτων',
+        'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ': 'Κατανομή Καλής Γνώσης Ελληνικών',
+        'ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ': 'Κατανομή Παιδιών Εκπαιδευτικών',
+        'ΙΚΑΝΟΠΟΙΗΤ': 'Κατανομή Ικανοποιητικής Μαθησιακής Ικανότητας'
+    }
+
+    if επιλογη == "Συγκεντρωτικά":
+        for col in plot_columns:
+            if col in df_result.columns:
+                plot_distribution(df_result, col, plot_titles.get(col, f"Κατανομή βάσει {col}"))
+            else:
+                st.warning(f"Η στήλη '{col}' δεν βρέθηκε στο αρχείο σας για γραφήματα.")
+    else:
+        for col in plot_columns:
+            if col in df_result.columns:
+                plot_distribution(df_result, col, f"Κατανομή βάσει {col}")
+            else:
+                st.warning(f"Η στήλη '{col}' δεν βρέθηκε στο αρχείο σας για γραφήματα.")
+
+st.markdown("---")
+st.markdown(
+    """
+    📌 **Νομική Δήλωση**: Η χρήση της εφαρμογής επιτρέπεται μόνο με ρητή γραπτή άδεια της δημιουργού, Παναγιώτας Γιαννιτσοπούλου.
+    Όλα τα πνευματικά δικαιώματα ανήκουν στη Γιαννιτσοπούλου Παναγιώτα. Για άδεια χρήσης:
+    [yiannitsoopanayiota.katanomi@gmail.com](mailto:yiannitsoopanayiota.katanomi@gmail.com)
+    """
+)import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+from io import BytesIO
+import random
+import math
+
+# ----------------------------------------------------
+# Βοηθητικές Συναρτήσεις
+# ----------------------------------------------------
+
+def is_mutual_friend(df, child1_name, child2_name):
+    f1_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child1_name, 'ΦΙΛΙΑ'].values
+    f2_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child2_name, 'ΦΙΛΙΑ'].values
+
+    f1 = str(f1_val[0]) if f1_val.size > 0 and pd.notna(f1_val[0]) else ""
+    f2 = str(f2_val[0]) if f2_val.size > 0 and pd.notna(f2_val[0]) else ""
+
+    friends1 = [f.strip() for f in f1.split(",") if f.strip()]
+    friends2 = [f.strip() for f in f2.split(",") if f.strip()]
+
+    return (child2_name in friends1) and (child1_name in friends2)
+
+def has_conflict(df, child1_name, child2_name):
+    c1_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child1_name, 'ΣΥΓΚΡΟΥΣΗ'].values
+    c2_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child2_name, 'ΣΥΓΚΡΟΥΣΗ'].values
+
+    c1 = str(c1_val[0]) if c1_val.size > 0 and pd.notna(c1_val[0]) else ""
+    c2 = str(c2_val[0]) if c2_val.size > 0 and pd.notna(c2_val[0]) else ""
+
+    conflicts1 = [c.strip() for c in c1.split(",") if c.strip()]
+    conflicts2 = [c.strip() for c in c2.split(",") if c.strip()]
+
+    return (child2_name in conflicts1) or (child1_name in conflicts2)
+
+def initialize_class_stats():
+    stats = {'count': 0, 'ΦΥΛΟ_Κ': 0, 'ΦΥΛΟ_Α': 0}
+    characteristics_N_O = ['ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΙΚΑΝΟΠΟΙΗΤ']
+    for char in characteristics_N_O:
+        stats[f'{char}_Ν'] = 0
+    return stats
+
+def τοποθέτηση(df_students, τμηματα_dict, class_stats_dict, μαθητης_name, τμημα_name, κλειδωμα=True):
+    idx = df_students.index[df_students['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == μαθητης_name].tolist()
+    if not idx:
+        st.warning(f"Προσοχή: Μαθητής '{μαθητης_name}' δεν βρέθηκε στο DataFrame.")
+        return
+
+    idx = idx[0]
+    
+    df_students.at[idx, 'ΤΜΗΜΑ'] = τμημα_name
+    df_students.at[idx, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = κλειδωμα
+
+    τμηματα_dict[τμημα_name].append(μαθητης_name)
+
+    if τμημα_name not in class_stats_dict:
+        class_stats_dict[τμημα_name] = initialize_class_stats()
+    
+    student_row = df_students.loc[idx]
+
+    class_stats_dict[τμημα_name]['count'] += 1
+
+    characteristics = ['ΦΥΛΟ', 'ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΙΚΑΝΟΠΟΙΗΤ']
+    
+    for char in characteristics:
+        if char == 'ΦΥΛΟ':
+            if student_row[char] == 'Κ':
+                class_stats_dict[τμημα_name]['ΦΥΛΟ_Κ'] += 1
+            elif student_row[char] == 'Α':
+                class_stats_dict[τμημα_name]['ΦΥΛΟ_Α'] += 1
+        elif student_row[char] == 'Ν':
+            class_stats_dict[τμημα_name][f'{char}_Ν'] += 1
+
+def can_place(df_students, student_row, target_class_name, τμηματα_dict, class_stats_dict, max_students_per_class, all_class_names):
+    # Έλεγχος μεγέθους τμήματος
+    if class_stats_dict[target_class_name]['count'] >= max_students_per_class:
+        return False, "Το τμήμα είναι πλήρες."
+
+    # Έλεγχος διαφοράς πληθυσμού
+    hypothetical_counts = {cls: stats['count'] for cls, stats in class_stats_dict.items()}
+    hypothetical_counts[target_class_name] += 1
+    
+    non_empty_counts = [count for count in hypothetical_counts.values() if count > 0]
+    
+    if non_empty_counts:
+        min_count_non_empty = min(non_empty_counts)
+        max_count_non_empty = max(non_empty_counts)
+        
+        if max_count_non_empty - min_count_non_empty > 1:
+            if hypothetical_counts[target_class_name] > min_count_non_empty + 1:
+                return False, "Η τοποθέτηση θα χαλάσει την ισορροπία πληθυσμού (>1)."
+
+    # Έλεγχος συγκρούσεων με ήδη τοποθετημένους μαθητές στο τμήμα
+    for placed_student_name in τμηματα_dict[target_class_name]:
+        if has_conflict(df_students, student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'], placed_student_name):
+            return False, f"Σύγκρουση με μαθητή '{placed_student_name}' στο τμήμα."
+    
+    return True, "Μπορεί να τοποθετηθεί."
+
+
+# ----------------------------------------------------
+# Κύρια Συνάρτηση Κατανομής Μαθητών
+# ----------------------------------------------------
+
+def πλήρης_κατανομή(df_initial, num_classes_input, max_students_per_class_input):
+    df = df_initial.copy()
+
+    if 'ΤΜΗΜΑ' not in df.columns:
+        df['ΤΜΗΜΑ'] = None
+    if 'ΚΛΕΙΔΩΜΕΝΟΣ' not in df.columns:
+        df['ΚΛΕΙΔΩΜΕΝΟΣ'] = False
+
+    num_students = len(df)
+    
+    min_required_classes = math.ceil(num_students / max_students_per_class_input)
+    if num_classes_input < min_required_classes:
+        st.error(f"Ο αριθμός τμημάτων ({num_classes_input}) είναι πολύ μικρός για τους {num_students} μαθητές. Χρειάζονται τουλάχιστον {min_required_classes} τμήματα με μέγιστο {max_students_per_class_input} μαθητές ανά τμήμα.")
+        return None
+
+    τμηματα = {f'Τμήμα {i+1}': [] for i in range(num_classes_input)}
+    class_stats = {f'Τμήμα {i+1}': initialize_class_stats() for i in range(num_classes_input)}
+    all_class_names = list(τμηματα.keys())
+    
+    st.write("Ξεκινάει η προηγμένη κατανομή...")
+
+    # Δημιουργία λίστας μη κλειδωμένων μαθητών για επεξεργασία.
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+    # ----- Βήμα 2: Παιδιά Εκπαιδευτικών -----
+    st.subheader("Βήμα 2: Τοποθέτηση Παιδιών Εκπαιδευτικών")
+    teacher_children_to_place = unlocked_students_df[unlocked_students_df['ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ'] == 'Ν'].copy()
+    
+    current_class_idx = 0
+    for idx, student_row in teacher_children_to_place.iterrows():
+        student_name = student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ']
+        
+        if df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'].iloc[0]:
+            continue
+
+        placed_in_step = False
+        for _ in range(num_classes_input):
+            target_class_name = all_class_names[current_class_idx]
+            
+            if class_stats[target_class_name]['ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ_Ν'] == 0:
+                is_valid, msg = can_place(df, student_row, target_class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                if is_valid:
+                    τοποθέτηση(df, τμηματα, class_stats, student_name, target_class_name, κλειδωμα=True)
+                    st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Παιδί Εκπαιδευτικού) στο {target_class_name}.")
+                    placed_in_step = True
+                    break
+            current_class_idx = (current_class_idx + 1) % num_classes_input
+
+        if not placed_in_step:
+            for class_name in all_class_names:
+                is_valid, msg = can_place(df, student_row, class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                if is_valid:
+                    τοποθέτηση(df, τμηματα, class_stats, student_name, class_name, κλειδωμα=True)
+                    st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Παιδί Εκπαιδευτικού) στο {class_name} (Αναπληρωματικό).")
+                    placed_in_step = True
+                    break
+            
+        if placed_in_step:
+            df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = True
+
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+
+    # ----- Βήμα 3: Ζωηροί Μαθητές -----
+    st.subheader("Βήμα 3: Τοποθέτηση Ζωηρών Μαθητών")
+    lively_students_to_place = unlocked_students_df[unlocked_students_df['ΖΩΗΡΟΣ'] == 'Ν'].copy()
+    
+    current_class_idx = 0
+    for idx, student_row in lively_students_to_place.iterrows():
+        student_name = student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ']
+
+        if df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'].iloc[0]:
+            continue
+
+        placed_in_step = False
+        min_lively_count = float('inf')
+        best_class_for_lively = None
+
+        for _ in range(num_classes_input):
+            target_class_name = all_class_names[current_class_idx]
+            
+            is_valid, msg = can_place(df, student_row, target_class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+            
+            if is_valid:
+                lively_count_in_class = class_stats[target_class_name]['ΖΩΗΡΟΣ_Ν']
+                if lively_count_in_class < min_lively_count:
+                    min_lively_count = lively_count_in_class
+                    best_class_for_lively = target_class_name
+            current_class_idx = (current_class_idx + 1) % num_classes_input
+        
+        if best_class_for_lively:
+            τοποθέτηση(df, τμηματα, class_stats, student_name, best_class_for_lively, κλειδωμα=True)
+            st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Ζωηρός) στο {best_class_for_lively}.")
+            placed_in_step = True
+        else:
+            for class_name in all_class_names:
+                is_valid, msg = can_place(df, student_row, class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                if is_valid:
+                    τοποθέτηση(df, τμηματα, class_stats, student_name, class_name, κλειδωμα=True)
+                    st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Ζωηρός) στο {class_name} (Αναπληρωματικό).")
+                    placed_in_step = True
+                    break
+        
+        if placed_in_step:
+            df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = True
+
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+
+    # ----- Βή 4: Παιδιά με Ιδιαιτερότητες -----
+    st.subheader("Βήμα 4: Τοποθέτηση Παιδιών με Ιδιαιτερότητες")
+    special_needs_students_to_place = unlocked_students_df[unlocked_students_df['ΙΔΙΑΙΤΕΡΟΤΗΤΑ'] == 'Ν'].copy()
+    
+    current_class_idx = 0
+    for idx, student_row in special_needs_students_to_place.iterrows():
+        student_name = student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ']
+
+        if df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'].iloc[0]:
+            continue
+
+        placed_in_step = False
+        
+        # Πρώτη προτεραιότητα: Ένας μαθητής με ιδιαιτερότητα ανά τμήμα
+        for _ in range(num_classes_input):
+            target_class_name = all_class_names[current_class_idx]
+            
+            if class_stats[target_class_name]['ΙΔΙΑΙΤΕΡΟΤΗΤΑ_Ν'] == 0:
+                is_valid, msg = can_place(df, student_row, target_class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                if is_valid:
+                    τοποθέτηση(df, τμηματα, class_stats, student_name, target_class_name, κλειδωμα=True)
+                    st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Ιδιαιτερότητα) στο {target_class_name}.")
+                    placed_in_step = True
+                    break
+            current_class_idx = (current_class_idx + 1) % num_classes_input
+
+        # Δεύτερη προτεραιότητα: Αν είναι περισσότεροι, οι επιπλέον:
+        if not placed_in_step:
+            min_lively_in_class = float('inf') # Για να βρούμε το τμήμα με τους λιγότερους ζωηρούς
+            best_class_for_special = None
+            
+            random.shuffle(all_class_names)
+            for class_name in all_class_names:
+                is_valid, msg = can_place(df, student_row, class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                if is_valid:
+                    current_lively_in_class = class_stats[class_name]['ΖΩΗΡΟΣ_Ν']
+                    if current_lively_in_class < min_lively_in_class:
+                        min_lively_in_class = current_lively_in_class
+                        best_class_for_special = class_name
+            
+            if best_class_for_special:
+                τοποθέτηση(df, τμηματα, class_stats, student_name, best_class_for_special, κλειδωμα=True)
+                st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Ιδιαιτερότητα - Επιπλέον) στο {best_class_for_special}.")
+                placed_in_step = True
+            else:
+                st.warning(f"Δεν ήταν δυνατή η τοποθέτηση του/της μαθητή/τριας '{student_name}' (Ιδιαιτερότητα) σε κανένα τμήμα.")
+
+        if placed_in_step:
+            df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = True
+
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+
+    # ----- Βήμα 5: Φίλοι Παιδιών που Τοποθετήθηκαν -----
+    st.subheader("Βήμα 5: Τοποθέτηση Φίλων Τοποθετημένων Παιδιών")
+
+    locked_students_names = df[df['ΚΛΕΙΔΩΜΕΝΟΣ'] == True]['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'].tolist()
+
+    made_placement = True
+    while made_placement:
+        made_placement = False
+        unlocked_students_to_check = df[(df['ΚΛΕΙΔΩΜΕΝΟΣ'] == False)].copy().sample(frac=1, random_state=42)
+        
+        for idx, student_row in unlocked_students_to_check.iterrows():
+            student_name = student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ']
+            
+            if df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'].iloc[0]:
+                continue
+
+            friends_list_str = str(student_row['ΦΙΛΙΑ']) if pd.notna(student_row['ΦΙΛΙΑ']) else ""
+            friends_list = [f.strip() for f in friends_list_str.split(",") if f.strip()]
+
+            for friend_name in friends_list:
+                if friend_name in locked_students_names:
+                    if is_mutual_friend(df, student_name, friend_name):
+                        friend_class = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == friend_name, 'ΤΜΗΜΑ'].iloc[0]
+                        
+                        if friend_class is not None:
+                            is_valid, msg = can_place(df, student_row, friend_class, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                            if is_valid:
+                                τοποθέτηση(df, τμηματα, class_stats, student_name, friend_class, κλειδωμα=True)
+                                st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' με τον/την φίλο/η '{friend_name}' στο {friend_class}.")
+                                df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = True
+                                locked_students_names.append(student_name)
+                                made_placement = True
+                                break
+            if made_placement:
+                break 
+    
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+
+    # ----- Βήμα 6: Φιλικές Ομάδες ανά Γνώση Ελληνικών -----
+    st.subheader("Βήμα 6: Τοποθέτηση Φιλικών Ομάδων ανά Γνώση Ελληνικών / Ικανότητα")
+    
+    greek_knowledge_students = unlocked_students_df[unlocked_students_df['ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ'] == 'Ν'].copy()
+    satisfactory_ability_students = unlocked_students_df[unlocked_students_df['ΙΚΑΝΟΠΟΙΗΤ'] == 'Ν'].copy()
+
+    students_for_step_6 = pd.concat([
+        greek_knowledge_students, 
+        satisfactory_ability_students[~satisfactory_ability_students['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'].isin(greek_knowledge_students['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'])]
+    ]).sample(frac=1, random_state=42).reset_index(drop=True)
+
+    for idx, student_row in students_for_step_6.iterrows():
+        student_name = student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ']
+
+        if df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'].iloc[0]:
+            continue
+
+        placed_in_step = False
+        
+        friends_list_str = str(student_row['ΦΙΛΙΑ']) if pd.notna(student_row['ΦΙΛΙΑ']) else ""
+        friends_list = [f.strip() for f in friends_list_str.split(",") if f.strip()]
+        
+        mutual_unlocked_friends = []
+        for friend_name in friends_list:
+            friend_exists = df[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == friend_name]
+            if not friend_exists.empty and friend_exists['ΚΛΕΙΔΩΜΕΝΟΣ'].iloc[0] == False:
+                if is_mutual_friend(df, student_name, friend_name):
+                    mutual_unlocked_friends.append(friend_name)
+        
+        group_to_place = [student_name] + mutual_unlocked_friends
+        
+        random.shuffle(all_class_names)
+        for class_name in all_class_names:
+            can_place_group = True
+            temp_df = df.copy()
+            temp_τμηματα = {k: v[:] for k, v in τμηματα.items()}
+            temp_class_stats = {k: v.copy() for k, v in class_stats.items()}
+            
+            for member_name in group_to_place:
+                member_row = temp_df.loc[temp_df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == member_name].iloc[0]
+                is_valid, msg = can_place(temp_df, member_row, class_name, temp_τμηματα, temp_class_stats, max_students_per_class_input, all_class_names)
+                if not is_valid:
+                    can_place_group = False
+                    break
+                τοποθέτηση(temp_df, temp_τμηματα, temp_class_stats, member_name, class_name, κλειδωμα=False)
+
+            if can_place_group:
+                for member_name in group_to_place:
+                    τοποθέτηση(df, τμηματα, class_stats, member_name, class_name, κλειδωμα=True)
+                    st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{member_name}' (Ομάδα) στο {class_name}.")
+                    df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == member_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = True
+                placed_in_step = True
+                break
+
+        if not placed_in_step:
+            random.shuffle(all_class_names)
+            for class_name in all_class_names:
+                is_valid, msg = can_place(df, student_row, class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                if is_valid:
+                    τοποθέτηση(df, τμηματα, class_stats, student_name, class_name, κλειδωμα=True)
+                    st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Μόνος) στο {class_name}.")
+                    df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = True
+                    placed_in_step = True
+                    break
+            if not placed_in_step:
+                st.warning(f"Δεν ήταν δυνατή η τοποθέτηση του/της μαθητή/τριας '{student_name}' (ομάδα/μόνος) σε κανένα τμήμα.")
+
+
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+
+    # ----- Βήμα 7: Υπόλοιποι Μαθητές Χωρίς Φιλίες -----
+    st.subheader("Βήμα 7: Τοποθέτηση Υπόλοιπων Μαθητών")
+
+    for idx, student_row in unlocked_students_df.iterrows():
+        student_name = student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ']
+
+        if df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'].iloc[0]:
+            continue
+
+        placed_in_step = False
+        
+        # Λίστα με τμήματα, ανακατεμένη για τυχαιότητα στην επιλογή
+        shuffled_class_names = all_class_names[:]
+        random.shuffle(shuffled_class_names)
+
+        # Πρώτη προτεραιότητα: Τμήμα που χρειάζεται μαθητές για ισορροπία πληθυσμού
+        best_class = None
+        min_students = min(class_stats[cls]['count'] for cls in all_class_names)
+        
+        # Βρες τμήματα με τον ελάχιστο αριθμό μαθητών
+        potential_classes = [cls for cls in shuffled_class_names if class_stats[cls]['count'] == min_students]
+        
+        # Αν υπάρχουν, προσπάθησε πρώτα να τοποθετήσεις εκεί
+        for class_name in potential_classes:
+            is_valid, msg = can_place(df, student_row, class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+            if is_valid:
+                τοποθέτηση(df, τμηματα, class_stats, student_name, class_name, κλειδωμα=True)
+                st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Υπόλοιπος) στο {class_name} (Ισορροπία Πληθυσμού).")
+                placed_in_step = True
+                break
+        
+        # Αν δεν τοποθετήθηκε ακόμα, προσπάθησε σε οποιοδήποτε έγκυρο τμήμα,
+        # δίνοντας προτεραιότητα στο φύλο για ισορροπία
+        if not placed_in_step:
+            gender_target_class = None
+            min_gender_diff = float('inf')
+
+            for class_name in shuffled_class_names:
+                is_valid, msg = can_place(df, student_row, class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                if is_valid:
+                    # Υπολογισμός υποθετικής διαφοράς φύλου
+                    temp_male_count = class_stats[class_name]['ΦΥΛΟ_Α']
+                    temp_female_count = class_stats[class_name]['ΦΥΛΟ_Κ']
+                    
+                    if student_row['ΦΥΛΟ'] == 'Α':
+                        temp_male_count += 1
+                    else:
+                        temp_female_count += 1
+                    
+                    current_gender_diff = abs(temp_male_count - temp_female_count)
+
+                    if current_gender_diff < min_gender_diff:
+                        min_gender_diff = current_gender_diff
+                        gender_target_class = class_name
+            
+            if gender_target_class:
+                τοποθέτηση(df, τμηματα, class_stats, student_name, gender_target_class, κλειδωμα=True)
+                st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Υπόλοιπος) στο {gender_target_class} (Ισορροπία Φύλου).")
+                placed_in_step = True
+            else:
+                st.warning(f"Δεν ήταν δυνατή η τοποθέτηση του/της μαθητή/τριας '{student_name}' (υπόλοιπος) σε κανένα τμήμα.")
+
+        if placed_in_step:
+            df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = True
+
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+
+    # ----- Βήμα 8: Έλεγχος Ποιοτικών Χαρακτηριστικών & Διορθώσεις -----
+    # Κωδικοποίηση για Βήμα 8 θα ακολουθήσει
+
+
+    return df
+
+# ----------------------------------------------------
+# Λοιπές συναρτήσεις (παραμένουν ίδιες)
+# ----------------------------------------------------
+
+def create_excel_file(df):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='Κατανομή')
+    return output.getvalue()
+
+def plot_distribution(df, column, title):
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    if column == 'ΦΥΛΟ':
+        categories = ['Κ', 'Α']
+    else:
+        categories = ['Ν', 'Ο']
+
+    grouped_data = df.groupby(['ΤΜΗΜΑ', column]).size().unstack(fill_value=0)
+    
+    for cat in categories:
+        if cat not in grouped_data.columns:
+            grouped_data[cat] = 0
+
+    grouped_data = grouped_data[categories]
+    
+    grouped_data.plot(kind='bar', stacked=True, ax=ax)
+    
+    ax.set_title(title)
+    ax.set_ylabel('Αριθμός Μαθητών')
+    ax.set_xlabel('Τμήμα')
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    st.pyplot(fig)
+
+# ----------------------------------------------------
+# Κύριο μέρος εφαρμογής Streamlit (παραμένει ίδιο)
+# ----------------------------------------------------
+
+st.sidebar.title("🔐 Κωδικός Πρόσβασης")
+password = st.sidebar.text_input("Εισάγετε τον κωδικό:", type="password")
+if password != "katanomi2025":
+    st.warning("Παρακαλώ εισάγετε έγκυρο κωδικό για πρόσβαση στην εφαρμογή.")
+    st.stop()
+
+enable_app = st.sidebar.checkbox("✅ Ενεργοποίηση Εφαρμογής", value=True)
+if not enable_app:
+    st.info("✋ Η εφαρμογή είναι προσωρινά απενεργοποιημένη.")
+    st.stop()
+
+st.title("📊 Ψηφιακή Κατανομή Μαθητών Α' Δημοτικού")
+
+uploaded_file = st.file_uploader("⬆️ Εισαγωγή Excel αρχείου μαθητών", type="xlsx")
+
+df_students = None
+
+if uploaded_file is not None:
+    df_students = pd.read_excel(uploaded_file)
+    st.success("✅ Το αρχείο φορτώθηκε επιτυχώς!")
+
+    st.subheader("Προεπισκόπηση Δεδομένων:")
+    st.dataframe(df_students.head())
+
+    st.sidebar.subheader("Ρυθμίσεις Κατανομής")
+    num_classes_input = st.sidebar.number_input("Αριθμός Τμημάτων:", min_value=1, value=3, step=1)
+    max_students_per_class_input = st.sidebar.number_input("Μέγιστος αριθμός μαθητών ανά τμήμα:", min_value=10, max_value=30, value=25, step=1)
+
+    if st.button("▶️ Εκτέλεση Κατανομής Μαθητών"):
+        df_katanomi = πλήρης_κατανομή(df_students.copy(), num_classes_input, max_students_per_class_input)
+        if df_katanomi is not None:
+            st.session_state["df_katanomi"] = df_katanomi
+            st.success("✅ Ολοκληρώθηκε η κατανομή μαθητών!")
+        else:
+            pass
+
+if "df_katanomi" in st.session_state and st.session_state["df_katanomi"] is not None:
+    df_result = st.session_state["df_katanomi"]
+
+    st.subheader("📊 Αποτελέσματα Κατανομής")
+    st.dataframe(df_result)
+
+    if st.button("⬇️ Λήψη Excel με Κατανομή"):
+        excel_bytes = create_excel_file(df_result)
+        st.download_button(
+            label="⬇️ Κατέβασε το αρχείο Excel",
+            data=excel_bytes,
+            file_name="katanomi.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    
+    st.subheader("📊 Πίνακας Στατιστικών Κατανομής")
+    if 'ΤΜΗΜΑ' in df_result.columns and not df_result['ΤΜΗΜΑ'].isnull().all():
+        characteristics_for_stats = ['ΦΥΛΟ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΙΚΑΝΟΠΟΙΗΤ']
+        
+        df_stats = df_result.copy()
+        for col in characteristics_for_stats:
+            if col != 'ΦΥΛΟ':
+                df_stats[col] = df_stats[col].apply(lambda x: True if x == 'Ν' else False)
+
+        female_counts = df_stats[df_stats['ΦΥΛΟ'] == 'Κ'].groupby('ΤΜΗΜΑ').size().reindex(df_result['ΤΜΗΜΑ'].unique(), fill_value=0)
+        male_counts = df_stats[df_stats['ΦΥΛΟ'] == 'Α'].groupby('ΤΜΗΜΑ').size().reindex(df_result['ΤΜΗΜΑ'].unique(), fill_value=0)
+
+        stats_table = pd.DataFrame({
+            'Σύνολο Μαθητών': df_result.groupby('ΤΜΗΜΑ').size().reindex(df_result['ΤΜΗΜΑ'].unique(), fill_value=0),
+            'Κορίτσια': female_counts,
+            'Αγόρια': male_counts,
+        })
+        
+        for col in characteristics_for_stats:
+            if col != 'ΦΥΛΟ':
+                stats_table[f'{col} (Ναι)'] = df_stats.groupby('ΤΜΗΜΑ')[col].sum().reindex(df_result['ΤΜΗΜΑ'].unique(), fill_value=0)
+        
+        st.dataframe(stats_table)
+    else:
+        st.info("Δεν έχουν τοποθετηθεί μαθητές σε τμήματα ακόμα για στατιστικά.")
+
+    st.subheader("📈 Ραβδογράμματα Κατανομής")
+    επιλογη = st.radio("Επιλέξτε τύπο γραφήματος:", ["Συγκεντρωτικά", "Ξεχωριστά ανά κατηγορία"])
+
+    plot_columns = ['ΦΥΛΟ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΙΚΑΝΟΠΟΙΗΤ']
+    plot_titles = {
+        'ΦΥΛΟ': 'Κατανομή Φύλου',
+        'ΖΩΗΡΟΣ': 'Κατανομή Ζωηρών Μαθητών',
+        'ΙΔΙΑΙΤΕΡΟΤΗΤΑ': 'Κατανομή Ιδιαιτεροτήτων',
+        'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ': 'Κατανομή Καλής Γνώσης Ελληνικών',
+        'ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ': 'Κατανομή Παιδιών Εκπαιδευτικών',
+        'ΙΚΑΝΟΠΟΙΗΤ': 'Κατανομή Ικανοποιητικής Μαθησιακής Ικανότητας'
+    }
+
+    if επιλογη == "Συγκεντρωτικά":
+        for col in plot_columns:
+            if col in df_result.columns:
+                plot_distribution(df_result, col, plot_titles.get(col, f"Κατανομή βάσει {col}"))
+            else:
+                st.warning(f"Η στήλη '{col}' δεν βρέθηκε στο αρχείο σας για γραφήματα.")
+    else:
+        for col in plot_columns:
+            if col in df_result.columns:
+                plot_distribution(df_result, col, f"Κατανομή βάσει {col}")
+            else:
+                st.warning(f"Η στήλη '{col}' δεν βρέθηκε στο αρχείο σας για γραφήματα.")
+
+st.markdown("---")
+st.markdown(
+    """
+    📌 **Νομική Δήλωση**: Η χρήση της εφαρμογής επιτρέπεται μόνο με ρητή γραπτή άδεια της δημιουργού, Παναγιώτας Γιαννιτσοπούλου.
+    Όλα τα πνευματικά δικαιώματα ανήκουν στη Γιαννιτσοπούλου Παναγιώτα. Για άδεια χρήσης:
+    [yiannitsoopanayiota.katanomi@gmail.com](mailto:yiannitsoopanayiota.katanomi@gmail.com)
+    """
+)import streamlit as st
+import pandas as pd
+import matplotlib.pyplot as plt
+from io import BytesIO
+import random
+import math
+
+# ----------------------------------------------------
+# Βοηθητικές Συναρτήσεις
+# ----------------------------------------------------
+
+def is_mutual_friend(df, child1_name, child2_name):
+    f1_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child1_name, 'ΦΙΛΙΑ'].values
+    f2_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child2_name, 'ΦΙΛΙΑ'].values
+
+    f1 = str(f1_val[0]) if f1_val.size > 0 and pd.notna(f1_val[0]) else ""
+    f2 = str(f2_val[0]) if f2_val.size > 0 and pd.notna(f2_val[0]) else ""
+
+    friends1 = [f.strip() for f in f1.split(",") if f.strip()]
+    friends2 = [f.strip() for f in f2.split(",") if f.strip()]
+
+    return (child2_name in friends1) and (child1_name in friends2)
+
+def has_conflict(df, child1_name, child2_name):
+    c1_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child1_name, 'ΣΥΓΚΡΟΥΣΗ'].values
+    c2_val = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == child2_name, 'ΣΥΓΚΡΟΥΣΗ'].values
+
+    c1 = str(c1_val[0]) if c1_val.size > 0 and pd.notna(c1_val[0]) else ""
+    c2 = str(c2_val[0]) if c2_val.size > 0 and pd.notna(c2_val[0]) else ""
+
+    conflicts1 = [c.strip() for c in c1.split(",") if c.strip()]
+    conflicts2 = [c.strip() for c in c2.split(",") if c.strip()]
+
+    return (child2_name in conflicts1) or (child1_name in conflicts2)
+
+def initialize_class_stats():
+    stats = {'count': 0, 'ΦΥΛΟ_Κ': 0, 'ΦΥΛΟ_Α': 0}
+    characteristics_N_O = ['ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΙΚΑΝΟΠΟΙΗΤ']
+    for char in characteristics_N_O:
+        stats[f'{char}_Ν'] = 0
+    return stats
+
+def τοποθέτηση(df_students, τμηματα_dict, class_stats_dict, μαθητης_name, τμημα_name, κλειδωμα=True):
+    idx = df_students.index[df_students['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == μαθητης_name].tolist()
+    if not idx:
+        st.warning(f"Προσοχή: Μαθητής '{μαθητης_name}' δεν βρέθηκε στο DataFrame.")
+        return
+
+    idx = idx[0]
+    
+    # Remove student from old class if already assigned
+    old_class = df_students.at[idx, 'ΤΜΗΜΑ']
+    if old_class and old_class in τμηματα_dict and μαθητης_name in τμηματα_dict[old_class]:
+        τμηματα_dict[old_class].remove(μαθητης_name)
+        if old_class in class_stats_dict:
+            class_stats_dict[old_class]['count'] -= 1
+            student_row_old = df_students.loc[idx]
+            if student_row_old['ΦΥΛΟ'] == 'Κ':
+                class_stats_dict[old_class]['ΦΥΛΟ_Κ'] -= 1
+            elif student_row_old['ΦΥΛΟ'] == 'Α':
+                class_stats_dict[old_class]['ΦΥΛΟ_Α'] -= 1
+            for char in ['ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΙΚΑΝΟΠΟΙΗΤ']:
+                if student_row_old[char] == 'Ν':
+                    class_stats_dict[old_class][f'{char}_Ν'] -= 1
+
+    df_students.at[idx, 'ΤΜΗΜΑ'] = τμημα_name
+    df_students.at[idx, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = κλειδωμα
+
+    τμηματα_dict[τμημα_name].append(μαθητης_name)
+
+    if τμημα_name not in class_stats_dict:
+        class_stats_dict[τμημα_name] = initialize_class_stats()
+    
+    student_row = df_students.loc[idx]
+
+    class_stats_dict[τμημα_name]['count'] += 1
+
+    characteristics = ['ΦΥΛΟ', 'ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΙΚΑΝΟΠΟΙΗΤ']
+    
+    for char in characteristics:
+        if char == 'ΦΥΛΟ':
+            if student_row[char] == 'Κ':
+                class_stats_dict[τμημα_name]['ΦΥΛΟ_Κ'] += 1
+            elif student_row[char] == 'Α':
+                class_stats_dict[τμημα_name]['ΦΥΛΟ_Α'] += 1
+        elif student_row[char] == 'Ν':
+            class_stats_dict[τμημα_name][f'{char}_Ν'] += 1
+
+def can_place(df_students, student_row, target_class_name, τμηματα_dict, class_stats_dict, max_students_per_class, all_class_names):
+    # Έλεγχος μεγέθους τμήματος
+    if class_stats_dict[target_class_name]['count'] >= max_students_per_class:
+        return False, "Το τμήμα είναι πλήρες."
+
+    # Έλεγχος διαφοράς πληθυσμού - μόνο αν η τοποθέτηση δεν είναι swap
+    # (αν είναι swap, η τοποθέτηση δεν αλλάζει τον συνολικό αριθμό μαθητών στο τμήμα)
+    current_student_class = student_row['ΤΜΗΜΑ']
+    if current_student_class != target_class_name: # Only check population balance if not moving within the same class
+        hypothetical_counts = {cls: stats['count'] for cls, stats in class_stats_dict.items()}
+        
+        # Adjust hypothetical counts for the move
+        if current_student_class and current_student_class in hypothetical_counts:
+            hypothetical_counts[current_student_class] -= 1
+        hypothetical_counts[target_class_name] += 1
+        
+        non_empty_counts = [count for count in hypothetical_counts.values() if count > 0]
+        
+        if non_empty_counts:
+            min_count_non_empty = min(non_empty_counts)
+            max_count_non_empty = max(non_empty_counts)
+            
+            if max_count_non_empty - min_count_non_empty > 1:
+                if hypothetical_counts[target_class_name] > min_count_non_empty + 1:
+                    return False, "Η τοποθέτηση θα χαλάσει την ισορροπία πληθυσμού (>1)."
+
+    # Έλεγχος συγκρούσεων με ήδη τοποθετημένους μαθητές στο τμήμα (εκτός από τον εαυτό του αν είναι ήδη εκεί)
+    for placed_student_name in τμηματα_dict[target_class_name]:
+        if placed_student_name == student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ']: # Allow moving within the same class
+            continue
+        if has_conflict(df_students, student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'], placed_student_name):
+            return False, f"Σύγκρουση με μαθητή '{placed_student_name}' στο τμήμα."
+    
+    return True, "Μπορεί να τοποθετηθεί."
+
+
+# ----------------------------------------------------
+# Κύρια Συνάρτηση Κατανομής Μαθητών
+# ----------------------------------------------------
+
+def πλήρης_κατανομή(df_initial, num_classes_input, max_students_per_class_input):
+    df = df_initial.copy()
+
+    if 'ΤΜΗΜΑ' not in df.columns:
+        df['ΤΜΗΜΑ'] = None
+    if 'ΚΛΕΙΔΩΜΕΝΟΣ' not in df.columns:
+        df['ΚΛΕΙΔΩΜΕΝΟΣ'] = False
+
+    num_students = len(df)
+    
+    min_required_classes = math.ceil(num_students / max_students_per_class_input)
+    if num_classes_input < min_required_classes:
+        st.error(f"Ο αριθμός τμημάτων ({num_classes_input}) είναι πολύ μικρός για τους {num_students} μαθητές. Χρειάζονται τουλάχιστον {min_required_classes} τμήματα με μέγιστο {max_students_per_class_input} μαθητές ανά τμήμα.")
+        return None
+
+    τμηματα = {f'Τμήμα {i+1}': [] for i in range(num_classes_input)}
+    class_stats = {f'Τμήμα {i+1}': initialize_class_stats() for i in range(num_classes_input)}
+    all_class_names = list(τμηματα.keys())
+    
+    st.write("Ξεκινάει η προηγμένη κατανομή...")
+
+    # Δημιουργία λίστας μη κλειδωμένων μαθητών για επεξεργασία.
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+    # ----- Βήμα 2: Παιδιά Εκπαιδευτικών -----
+    st.subheader("Βήμα 2: Τοποθέτηση Παιδιών Εκπαιδευτικών")
+    teacher_children_to_place = unlocked_students_df[unlocked_students_df['ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ'] == 'Ν'].copy()
+    
+    current_class_idx = 0
+    for idx, student_row in teacher_children_to_place.iterrows():
+        student_name = student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ']
+        
+        if df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'].iloc[0]:
+            continue
+
+        placed_in_step = False
+        for _ in range(num_classes_input):
+            target_class_name = all_class_names[current_class_idx]
+            
+            if class_stats[target_class_name]['ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ_Ν'] == 0:
+                is_valid, msg = can_place(df, student_row, target_class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                if is_valid:
+                    τοποθέτηση(df, τμηματα, class_stats, student_name, target_class_name, κλειδωμα=True)
+                    st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Παιδί Εκπαιδευτικού) στο {target_class_name}.")
+                    placed_in_step = True
+                    break
+            current_class_idx = (current_class_idx + 1) % num_classes_input
+
+        if not placed_in_step:
+            for class_name in all_class_names:
+                is_valid, msg = can_place(df, student_row, class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                if is_valid:
+                    τοποθέτηση(df, τμηματα, class_stats, student_name, class_name, κλειδωμα=True)
+                    st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Παιδί Εκπαιδευτικού) στο {class_name} (Αναπληρωματικό).")
+                    placed_in_step = True
+                    break
+            
+        if placed_in_step:
+            df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = True
+
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+
+    # ----- Βήμα 3: Ζωηροί Μαθητές -----
+    st.subheader("Βήμα 3: Τοποθέτηση Ζωηρών Μαθητών")
+    lively_students_to_place = unlocked_students_df[unlocked_students_df['ΖΩΗΡΟΣ'] == 'Ν'].copy()
+    
+    current_class_idx = 0
+    for idx, student_row in lively_students_to_place.iterrows():
+        student_name = student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ']
+
+        if df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'].iloc[0]:
+            continue
+
+        placed_in_step = False
+        min_lively_count = float('inf')
+        best_class_for_lively = None
+
+        for _ in range(num_classes_input):
+            target_class_name = all_class_names[current_class_idx]
+            
+            is_valid, msg = can_place(df, student_row, target_class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+            
+            if is_valid:
+                lively_count_in_class = class_stats[target_class_name]['ΖΩΗΡΟΣ_Ν']
+                if lively_count_in_class < min_lively_count:
+                    min_lively_count = lively_count_in_class
+                    best_class_for_lively = target_class_name
+            current_class_idx = (current_class_idx + 1) % num_classes_input
+        
+        if best_class_for_lively:
+            τοποθέτηση(df, τμηματα, class_stats, student_name, best_class_for_lively, κλειδωμα=True)
+            st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Ζωηρός) στο {best_class_for_lively}.")
+            placed_in_step = True
+        else:
+            for class_name in all_class_names:
+                is_valid, msg = can_place(df, student_row, class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                if is_valid:
+                    τοποθέτηση(df, τμηματα, class_stats, student_name, class_name, κλειδωμα=True)
+                    st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Ζωηρός) στο {class_name} (Αναπληρωματικό).")
+                    placed_in_step = True
+                    break
+        
+        if placed_in_step:
+            df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = True
+
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+
+    # ----- Βήμα 4: Παιδιά με Ιδιαιτερότητες -----
+    st.subheader("Βήμα 4: Τοποθέτηση Παιδιών με Ιδιαιτερότητες")
+    special_needs_students_to_place = unlocked_students_df[unlocked_students_df['ΙΔΙΑΙΤΕΡΟΤΗΤΑ'] == 'Ν'].copy()
+    
+    current_class_idx = 0
+    for idx, student_row in special_needs_students_to_place.iterrows():
+        student_name = student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ']
+
+        if df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'].iloc[0]:
+            continue
+
+        placed_in_step = False
+        
+        # Πρώτη προτεραιότητα: Ένας μαθητής με ιδιαιτερότητα ανά τμήμα
+        for _ in range(num_classes_input):
+            target_class_name = all_class_names[current_class_idx]
+            
+            if class_stats[target_class_name]['ΙΔΙΑΙΤΕΡΟΤΗΤΑ_Ν'] == 0:
+                is_valid, msg = can_place(df, student_row, target_class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                if is_valid:
+                    τοποθέτηση(df, τμηματα, class_stats, student_name, target_class_name, κλειδωμα=True)
+                    st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Ιδιαιτερότητα) στο {target_class_name}.")
+                    placed_in_step = True
+                    break
+            current_class_idx = (current_class_idx + 1) % num_classes_input
+
+        # Δεύτερη προτεραιότητα: Αν είναι περισσότεροι, οι επιπλέον:
+        if not placed_in_step:
+            min_lively_in_class = float('inf') # Για να βρούμε το τμήμα με τους λιγότερους ζωηρούς
+            best_class_for_special = None
+            
+            random.shuffle(all_class_names)
+            for class_name in all_class_names:
+                is_valid, msg = can_place(df, student_row, class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                if is_valid:
+                    current_lively_in_class = class_stats[class_name]['ΖΩΗΡΟΣ_Ν']
+                    if current_lively_in_class < min_lively_in_class:
+                        min_lively_in_class = current_lively_in_class
+                        best_class_for_special = class_name
+            
+            if best_class_for_special:
+                τοποθέτηση(df, τμηματα, class_stats, student_name, best_class_for_special, κλειδωμα=True)
+                st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Ιδιαιτερότητα - Επιπλέον) στο {best_class_for_special}.")
+                placed_in_step = True
+            else:
+                st.warning(f"Δεν ήταν δυνατή η τοποθέτηση του/της μαθητή/τριας '{student_name}' (Ιδιαιτερότητα) σε κανένα τμήμα.")
+
+        if placed_in_step:
+            df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = True
+
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+
+    # ----- Βήμα 5: Φίλοι Παιδιών που Τοποθετήθηκαν -----
+    st.subheader("Βήμα 5: Τοποθέτηση Φίλων Τοποθετημένων Παιδιών")
+
+    locked_students_names = df[df['ΚΛΕΙΔΩΜΕΝΟΣ'] == True]['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'].tolist()
+
+    made_placement = True
+    while made_placement:
+        made_placement = False
+        unlocked_students_to_check = df[(df['ΚΛΕΙΔΩΜΕΝΟΣ'] == False)].copy().sample(frac=1, random_state=42)
+        
+        for idx, student_row in unlocked_students_to_check.iterrows():
+            student_name = student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ']
+            
+            if df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'].iloc[0]:
+                continue
+
+            friends_list_str = str(student_row['ΦΙΛΙΑ']) if pd.notna(student_row['ΦΙΛΙΑ']) else ""
+            friends_list = [f.strip() for f in friends_list_str.split(",") if f.strip()]
+
+            for friend_name in friends_list:
+                if friend_name in locked_students_names:
+                    if is_mutual_friend(df, student_name, friend_name):
+                        friend_class = df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == friend_name, 'ΤΜΗΜΑ'].iloc[0]
+                        
+                        if friend_class is not None:
+                            is_valid, msg = can_place(df, student_row, friend_class, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                            if is_valid:
+                                τοποθέτηση(df, τμηματα, class_stats, student_name, friend_class, κλειδωμα=True)
+                                st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' με τον/την φίλο/η '{friend_name}' στο {friend_class}.")
+                                df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = True
+                                locked_students_names.append(student_name)
+                                made_placement = True
+                                break
+            if made_placement:
+                break 
+    
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+
+    # ----- Βήμα 6: Φιλικές Ομάδες ανά Γνώση Ελληνικών -----
+    st.subheader("Βήμα 6: Τοποθέτηση Φιλικών Ομάδων ανά Γνώση Ελληνικών / Ικανότητα")
+    
+    greek_knowledge_students = unlocked_students_df[unlocked_students_df['ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ'] == 'Ν'].copy()
+    satisfactory_ability_students = unlocked_students_df[unlocked_students_df['ΙΚΑΝΟΠΟΙΗΤ'] == 'Ν'].copy()
+
+    students_for_step_6 = pd.concat([
+        greek_knowledge_students, 
+        satisfactory_ability_students[~satisfactory_ability_students['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'].isin(greek_knowledge_students['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'])]
+    ]).sample(frac=1, random_state=42).reset_index(drop=True)
+
+    for idx, student_row in students_for_step_6.iterrows():
+        student_name = student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ']
+
+        if df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'].iloc[0]:
+            continue
+
+        placed_in_step = False
+        
+        friends_list_str = str(student_row['ΦΙΛΙΑ']) if pd.notna(student_row['ΦΙΛΙΑ']) else ""
+        friends_list = [f.strip() for f in friends_list_str.split(",") if f.strip()]
+        
+        mutual_unlocked_friends = []
+        for friend_name in friends_list:
+            friend_exists = df[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == friend_name]
+            if not friend_exists.empty and friend_exists['ΚΛΕΙΔΩΜΕΝΟΣ'].iloc[0] == False:
+                if is_mutual_friend(df, student_name, friend_name):
+                    mutual_unlocked_friends.append(friend_name)
+        
+        group_to_place = [student_name] + mutual_unlocked_friends
+        
+        random.shuffle(all_class_names)
+        for class_name in all_class_names:
+            can_place_group = True
+            temp_df = df.copy()
+            temp_τμηματα = {k: v[:] for k, v in τμηματα.items()}
+            temp_class_stats = {k: v.copy() for k, v in class_stats.items()}
+            
+            for member_name in group_to_place:
+                member_row = temp_df.loc[temp_df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == member_name].iloc[0]
+                is_valid, msg = can_place(temp_df, member_row, class_name, temp_τμηματα, temp_class_stats, max_students_per_class_input, all_class_names)
+                if not is_valid:
+                    can_place_group = False
+                    break
+                τοποθέτηση(temp_df, temp_τμηματα, temp_class_stats, member_name, class_name, κλειδωμα=False)
+
+            if can_place_group:
+                for member_name in group_to_place:
+                    τοποθέτηση(df, τμηματα, class_stats, member_name, class_name, κλειδωμα=True)
+                    st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{member_name}' (Ομάδα) στο {class_name}.")
+                    df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == member_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = True
+                placed_in_step = True
+                break
+
+        if not placed_in_step:
+            random.shuffle(all_class_names)
+            for class_name in all_class_names:
+                is_valid, msg = can_place(df, student_row, class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                if is_valid:
+                    τοποθέτηση(df, τμηματα, class_stats, student_name, class_name, κλειδωμα=True)
+                    st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Μόνος) στο {class_name}.")
+                    df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = True
+                    placed_in_step = True
+                    break
+            if not placed_in_step:
+                st.warning(f"Δεν ήταν δυνατή η τοποθέτηση του/της μαθητή/τριας '{student_name}' (ομάδα/μόνος) σε κανένα τμήμα.")
+
+
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+
+    # ----- Βήμα 7: Υπόλοιποι Μαθητές Χωρίς Φιλίες -----
+    st.subheader("Βήμα 7: Τοποθέτηση Υπόλοιπων Μαθητών")
+
+    for idx, student_row in unlocked_students_df.iterrows():
+        student_name = student_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ']
+
+        if df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'].iloc[0]:
+            continue
+
+        placed_in_step = False
+        
+        shuffled_class_names = all_class_names[:]
+        random.shuffle(shuffled_class_names)
+
+        best_class = None
+        min_students = min(class_stats[cls]['count'] for cls in all_class_names)
+        
+        potential_classes = [cls for cls in shuffled_class_names if class_stats[cls]['count'] == min_students]
+        
+        for class_name in potential_classes:
+            is_valid, msg = can_place(df, student_row, class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+            if is_valid:
+                τοποθέτηση(df, τμηματα, class_stats, student_name, class_name, κλειδωμα=True)
+                st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Υπόλοιπος) στο {class_name} (Ισορροπία Πληθυσμού).")
+                placed_in_step = True
+                break
+        
+        if not placed_in_step:
+            gender_target_class = None
+            min_gender_diff = float('inf')
+
+            for class_name in shuffled_class_names:
+                is_valid, msg = can_place(df, student_row, class_name, τμηματα, class_stats, max_students_per_class_input, all_class_names)
+                if is_valid:
+                    temp_male_count = class_stats[class_name]['ΦΥΛΟ_Α']
+                    temp_female_count = class_stats[class_name]['ΦΥΛΟ_Κ']
+                    
+                    if student_row['ΦΥΛΟ'] == 'Α':
+                        temp_male_count += 1
+                    else:
+                        temp_female_count += 1
+                    
+                    current_gender_diff = abs(temp_male_count - temp_female_count)
+
+                    if current_gender_diff < min_gender_diff:
+                        min_gender_diff = current_gender_diff
+                        gender_target_class = class_name
+            
+            if gender_target_class:
+                τοποθέτηση(df, τμηματα, class_stats, student_name, gender_target_class, κλειδωμα=True)
+                st.info(f"Τοποθετήθηκε ο/η μαθητής/τρια '{student_name}' (Υπόλοιπος) στο {gender_target_class} (Ισορροπία Φύλου).")
+                placed_in_step = True
+            else:
+                st.warning(f"Δεν ήταν δυνατή η τοποθέτηση του/της μαθητή/τριας '{student_name}' (υπόλοιπος) σε κανένα τμήμα.")
+
+        if placed_in_step:
+            df.loc[df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == student_name, 'ΚΛΕΙΔΩΜΕΝΟΣ'] = True
+
+    unlocked_students_df = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=42).reset_index(drop=True)
+
+
+    # ----- Βήμα 8: Έλεγχος Ποιοτικών Χαρακτηριστικών & Διορθώσεις -----
+    st.subheader("Βήμα 8: Έλεγχος Ποιοτικών Χαρακτηριστικών & Διορθώσεις")
+
+    # Χαρακτηριστικά προς εξισορρόπηση (εκτός φύλου, που αντιμετωπίζεται στο Βήμα 7)
+    qualitative_characteristics = ['ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΙΚΑΝΟΠΟΙΗΤ']
+    
+    # Επαναλαμβανόμενη διαδικασία για βελτιστοποίηση
+    max_iterations = 5 # Περιορισμός για να μην τρέχει επ' αόριστον
+    
+    for iteration in range(max_iterations):
+        st.write(f"Επανάληψη διόρθωσης: {iteration + 1}/{max_iterations}")
+        made_swap = False
+        
+        # Ανακατέψτε τους μαθητές που δεν είναι κλειδωμένοι αυστηρά
+        # (δηλαδή, μπορούν να μετακινηθούν αν βοηθάει στην ισορροπία)
+        movable_students = df[~df['ΚΛΕΙΔΩΜΕΝΟΣ']].copy().sample(frac=1, random_state=random.randint(0, 1000)).reset_index()
+
+        for idx1, student1_row in movable_students.iterrows():
+            student1_name = student1_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ']
+            class1 = student1_row['ΤΜΗΜΑ']
+            
+            if class1 is None: # Should not happen if all placed in previous steps
+                continue
+            
+            for idx2, student2_row in movable_students.iterrows():
+                if idx1 == idx2:
+                    continue # Δεν συγκρίνουμε τον ίδιο μαθητή
+                
+                student2_name = student2_row['ΟΝΟΜΑΤΕΠΩΝΥΜΟ']
+                class2 = student2_row['ΤΜΗΜΑ']
+
+                if class2 is None or class1 == class2: # Δεν συγκρίνουμε μαθητές στο ίδιο τμήμα
+                    continue
+
+                # Υποθετικός έλεγχος ανταλλαγής
+                temp_df = df.copy()
+                temp_τμηματα = {k: v[:] for k, v in τμηματα.items()}
+                temp_class_stats = {k: v.copy() for k, v in class_stats.items()}
+
+                # Προσομοίωση αφαίρεσης student1 από class1 και student2 από class2
+                τοποθέτηση(temp_df, temp_τμηματα, temp_class_stats, student1_name, None, κλειδωμα=False) # Προσωρινή "αφαίρεση"
+                τοποθέτηση(temp_df, temp_τμηματα, temp_class_stats, student2_name, None, κλειδωμα=False) # Προσωρινή "αφαίρεση"
+                
+                # Επανυπολογισμός στατιστικών για να είναι σωστές για το can_place
+                temp_class_stats_after_removal = {cls: initialize_class_stats() for cls in all_class_names}
+                for s_name in temp_df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ']:
+                    s_class = temp_df.loc[temp_df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == s_name, 'ΤΜΗΜΑ'].iloc[0]
+                    if s_class:
+                        temp_student_row = temp_df.loc[temp_df['ΟΝΟΜΑΤΕΠΩΝΥΜΟ'] == s_name].iloc[0]
+                        # Manually update stats for remaining students, as τοποθέτηση does this for the added student.
+                        # This part needs to be careful to not double-count if a student moves to None.
+                        if s_name not in [student1_name, student2_name]:
+                             if s_class not in temp_class_stats_after_removal:
+                                 temp_class_stats_after_removal[s_class] = initialize_class_stats()
+                             
+                             temp_class_stats_after_removal[s_class]['count'] += 1
+                             if temp_student_row['ΦΥΛΟ'] == 'Κ':
+                                 temp_class_stats_after_removal[s_class]['ΦΥΛΟ_Κ'] += 1
+                             elif temp_student_row['ΦΥΛΟ'] == 'Α':
+                                 temp_class_stats_after_removal[s_class]['ΦΥΛΟ_Α'] += 1
+                             for char in qualitative_characteristics:
+                                 if temp_student_row[char] == 'Ν':
+                                     temp_class_stats_after_removal[s_class][f'{char}_Ν'] += 1
+
+                # Ελέγχουμε αν μπορεί ο student1 να πάει στο class2 και ο student2 στο class1
+                can_s1_to_c2, msg1 = can_place(temp_df, student1_row, class2, temp_τμηματα, temp_class_stats_after_removal, max_students_per_class_input, all_class_names)
+                can_s2_to_c1, msg2 = can_place(temp_df, student2_row, class1, temp_τμηματα, temp_class_stats_after_removal, max_students_per_class_input, all_class_names)
+                
+                if can_s1_to_c2 and can_s2_to_c1:
+                    # Ελέγχουμε αν η ανταλλαγή βελτιώνει την ισορροπία
+                    
+                    # Υπολογισμός της αρχικής ανισορροπίας
+                    initial_imbalance = 0
+                    for char in qualitative_characteristics:
+                        initial_imbalance += abs(class_stats[class1][f'{char}_Ν'] - class_stats[class2][f'{char}_Ν'])
+                    initial_imbalance += abs(class_stats[class1]['ΦΥΛΟ_Κ'] - class_stats[class2]['ΦΥΛΟ_Κ'])
+                    initial_imbalance += abs(class_stats[class1]['ΦΥΛΟ_Α'] - class_stats[class2]['ΦΥΛΟ_Α'])
+
+                    # Υπολογισμός υποθετικών νέων στατιστικών
+                    hypo_stats = {k: v.copy() for k, v in class_stats.items()}
+                    
+                    # Remove student1 from class1's stats
+                    hypo_stats[class1]['count'] -= 1
+                    if student1_row['ΦΥΛΟ'] == 'Κ': hypo_stats[class1]['ΦΥΛΟ_Κ'] -= 1
+                    else: hypo_stats[class1]['ΦΥΛΟ_Α'] -= 1
+                    for char in qualitative_characteristics:
+                        if student1_row[char] == 'Ν': hypo_stats[class1][f'{char}_Ν'] -= 1
+                    
+                    # Add student2 to class1's stats
+                    hypo_stats[class1]['count'] += 1
+                    if student2_row['ΦΥΛΟ'] == 'Κ': hypo_stats[class1]['ΦΥΛΟ_Κ'] += 1
+                    else: hypo_stats[class1]['ΦΥΛΟ_Α'] += 1
+                    for char in qualitative_characteristics:
+                        if student2_row[char] == 'Ν': hypo_stats[class1][f'{char}_Ν'] += 1
+
+                    # Remove student2 from class2's stats
+                    hypo_stats[class2]['count'] -= 1
+                    if student2_row['ΦΥΛΟ'] == 'Κ': hypo_stats[class2]['ΦΥΛΟ_Κ'] -= 1
+                    else: hypo_stats[class2]['ΦΥΛΟ_Α'] -= 1
+                    for char in qualitative_characteristics:
+                        if student2_row[char] == 'Ν': hypo_stats[class2][f'{char}_Ν'] -= 1
+
+                    # Add student1 to class2's stats
+                    hypo_stats[class2]['count'] += 1
+                    if student1_row['ΦΥΛΟ'] == 'Κ': hypo_stats[class2]['ΦΥΛΟ_Κ'] += 1
+                    else: hypo_stats[class2]['ΦΥΛΟ_Α'] += 1
+                    for char in qualitative_characteristics:
+                        if student1_row[char] == 'Ν': hypo_stats[class2][f'{char}_Ν'] += 1
+
+                    # Υπολογισμός της νέας ανισορροπίας
+                    new_imbalance = 0
+                    for char in qualitative_characteristics:
+                        new_imbalance += abs(hypo_stats[class1][f'{char}_Ν'] - hypo_stats[class2][f'{char}_Ν'])
+                    new_imbalance += abs(hypo_stats[class1]['ΦΥΛΟ_Κ'] - hypo_stats[class2]['ΦΥΛΟ_Κ'])
+                    new_imbalance += abs(hypo_stats[class1]['ΦΥΛΟ_Α'] - hypo_stats[class2]['ΦΥΛΟ_Α'])
+
+                    if new_imbalance < initial_imbalance:
+                        # Εκτέλεση της ανταλλαγής
+                        τοποθέτηση(df, τμηματα, class_stats, student1_name, class2, κλειδωμα=student1_row['ΚΛΕΙΔΩΜΕΝΟΣ'])
+                        τοποθέτηση(df, τμηματα, class_stats, student2_name, class1, κλειδωμα=student2_row['ΚΛΕΙΔΩΜΕΝΟΣ'])
+                        st.info(f"Ανταλλάχθηκαν οι μαθητές '{student1_name}' και '{student2_name}' για βελτίωση ισορροπίας. ({class1} <-> {class2})")
+                        made_swap = True
+                        break # Ξαναξεκινήστε την επανάληψη για να επωφεληθείτε από τη νέα ισορροπία
+            if made_swap:
+                break
+        
+        if not made_swap:
+            st.info(f"Δεν βρέθηκαν περαιτέρω βελτιώσεις στην ισορροπία των χαρακτηριστικών στην επανάληψη {iteration + 1}.")
+            break # Δεν έγιναν αλλαγές, οπότε σταματάμε
+
+
+    # Τελικός έλεγχος και αναφορά για τυχόν ατοποθέτητους μαθητές
+    unplaced_students = df[df['ΤΜΗΜΑ'].isnull()]
+    if not unplaced_students.empty:
+        st.warning(f"Προσοχή: {len(unplaced_students)} μαθητές/τριες δεν τοποθετήθηκαν σε τμήμα.")
+        st.dataframe(unplaced_students)
+    else:
+        st.success("Όλοι οι μαθητές/τριες τοποθετήθηκαν επιτυχώς!")
+
+    return df
+
+# ----------------------------------------------------
+# Λοιπές συναρτήσεις (παραμένουν ίδιες)
+# ----------------------------------------------------
+
+def create_excel_file(df):
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='Κατανομή')
+    return output.getvalue()
+
+def plot_distribution(df, column, title):
+    fig, ax = plt.subplots(figsize=(10, 6))
+    
+    if column == 'ΦΥΛΟ':
+        categories = ['Κ', 'Α']
+    else:
+        categories = ['Ν', 'Ο']
+
+    grouped_data = df.groupby(['ΤΜΗΜΑ', column]).size().unstack(fill_value=0)
+    
+    for cat in categories:
+        if cat not in grouped_data.columns:
+            grouped_data[cat] = 0
+
+    grouped_data = grouped_data[categories]
+    
+    grouped_data.plot(kind='bar', stacked=True, ax=ax)
+    
+    ax.set_title(title)
+    ax.set_ylabel('Αριθμός Μαθητών')
+    ax.set_xlabel('Τμήμα')
+    plt.xticks(rotation=45, ha='right')
+    plt.tight_layout()
+    st.pyplot(fig)
+
+# ----------------------------------------------------
+# Κύριο μέρος εφαρμογής Streamlit (παραμένει ίδιο)
+# ----------------------------------------------------
+
+st.sidebar.title("🔐 Κωδικός Πρόσβασης")
+password = st.sidebar.text_input("Εισάγετε τον κωδικό:", type="password")
+if password != "katanomi2025":
+    st.warning("Παρακαλώ εισάγετε έγκυρο κωδικό για πρόσβαση στην εφαρμογή.")
+    st.stop()
+
+enable_app = st.sidebar.checkbox("✅ Ενεργοποίηση Εφαρμογής", value=True)
+if not enable_app:
+    st.info("✋ Η εφαρμογή είναι προσωρινά απενεργοποιημένη.")
+    st.stop()
+
+st.title("📊 Ψηφιακή Κατανομή Μαθητών Α' Δημοτικού")
+
+uploaded_file = st.file_uploader("⬆️ Εισαγωγή Excel αρχείου μαθητών", type="xlsx")
+
+df_students = None
+
+if uploaded_file is not None:
+    df_students = pd.read_excel(uploaded_file)
+    st.success("✅ Το αρχείο φορτώθηκε επιτυχώς!")
+
+    st.subheader("Προεπισκόπηση Δεδομένων:")
+    st.dataframe(df_students.head())
+
+    st.sidebar.subheader("Ρυθμίσεις Κατανομής")
+    num_classes_input = st.sidebar.number_input("Αριθμός Τμημάτων:", min_value=1, value=3, step=1)
+    max_students_per_class_input = st.sidebar.number_input("Μέγιστος αριθμός μαθητών ανά τμήμα:", min_value=10, max_value=30, value=25, step=1)
+
+    if st.button("▶️ Εκτέλεση Κατανομής Μαθητών"):
+        df_katanomi = πλήρης_κατανομή(df_students.copy(), num_classes_input, max_students_per_class_input)
+        if df_katanomi is not None:
+            st.session_state["df_katanomi"] = df_katanomi
+            st.success("✅ Ολοκληρώθηκε η κατανομή μαθητών!")
+        else:
+            pass
+
+if "df_katanomi" in st.session_state and st.session_state["df_katanomi"] is not None:
+    df_result = st.session_state["df_katanomi"]
+
+    st.subheader("📊 Αποτελέσματα Κατανομής")
+    st.dataframe(df_result)
+
+    if st.button("⬇️ Λήψη Excel με Κατανομή"):
+        excel_bytes = create_excel_file(df_result)
+        st.download_button(
+            label="⬇️ Κατέβασε το αρχείο Excel",
+            data=excel_bytes,
+            file_name="katanomi.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    
+    st.subheader("📊 Πίνακας Στατιστικών Κατανομής")
+    if 'ΤΜΗΜΑ' in df_result.columns and not df_result['ΤΜΗΜΑ'].isnull().all():
+        characteristics_for_stats = ['ΦΥΛΟ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΙΚΑΝΟΠΟΙΗΤ']
+        
+        df_stats = df_result.copy()
+        for col in characteristics_for_stats:
+            if col != 'ΦΥΛΟ':
+                df_stats[col] = df_stats[col].apply(lambda x: True if x == 'Ν' else False)
+
+        female_counts = df_stats[df_stats['ΦΥΛΟ'] == 'Κ'].groupby('ΤΜΗΜΑ').size().reindex(df_result['ΤΜΗΜΑ'].unique(), fill_value=0)
+        male_counts = df_stats[df_stats['ΦΥΛΟ'] == 'Α'].groupby('ΤΜΗΜΑ').size().reindex(df_result['ΤΜΗΜΑ'].unique(), fill_value=0)
+
+        stats_table = pd.DataFrame({
+            'Σύνολο Μαθητών': df_result.groupby('ΤΜΗΜΑ').size().reindex(df_result['ΤΜΗΜΑ'].unique(), fill_value=0),
+            'Κορίτσια': female_counts,
+            'Αγόρια': male_counts,
+        })
+        
+        for col in characteristics_for_stats:
+            if col != 'ΦΥΛΟ':
+                stats_table[f'{col} (Ναι)'] = df_stats.groupby('ΤΜΗΜΑ')[col].sum().reindex(df_result['ΤΜΗΜΑ'].unique(), fill_value=0)
+        
+        st.dataframe(stats_table)
+    else:
+        st.info("Δεν έχουν τοποθετηθεί μαθητές σε τμήματα ακόμα για στατιστικά.")
+
+    st.subheader("📈 Ραβδογράμματα Κατανομής")
+    επιλογη = st.radio("Επιλέξτε τύπο γραφήματος:", ["Συγκεντρωτικά", "Ξεχωριστά ανά κατηγορία"])
+
+    plot_columns = ['ΦΥΛΟ', 'ΖΩΗΡΟΣ', 'ΙΔΙΑΙΤΕΡΟΤΗΤΑ', 'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ', 'ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ', 'ΙΚΑΝΟΠΟΙΗΤ']
+    plot_titles = {
+        'ΦΥΛΟ': 'Κατανομή Φύλου',
+        'ΖΩΗΡΟΣ': 'Κατανομή Ζωηρών Μαθητών',
+        'ΙΔΙΑΙΤΕΡΟΤΗΤΑ': 'Κατανομή Ιδιαιτεροτήτων',
+        'ΚΑΛΗ ΓΝΩΣΗ ΕΛΛΗΝΙΚΩΝ': 'Κατανομή Καλής Γνώσης Ελληνικών',
+        'ΠΑΙΔΙ ΕΚΠΑΙΔΕΥΤΙΚΟΥ': 'Κατανομή Παιδιών Εκπαιδευτικών',
+        'ΙΚΑΝΟΠΟΙΗΤ': 'Κατανομή Ικανοποιητικής Μαθησιακής Ικανότητας'
+    }
+
+    if επιλογη == "Συγκεντρωτικά":
+        for col in plot_columns:
+            if col in df_result.columns:
+                plot_distribution(df_result, col, plot_titles.get(col, f"Κατανομή βάσει {col}"))
+            else:
+                st.warning(f"Η στήλη '{col}' δεν βρέθηκε στο αρχείο σας για γραφήματα.")
+    else:
+        for col in plot_columns:
+            if col in df_result.columns:
+                plot_distribution(df_result, col, f"Κατανομή βάσει {col}")
+            else:
+                st.warning(f"Η στήλη '{col}' δεν βρέθηκε στο αρχείο σας για γραφήματα.")
+
+st.markdown("---")
+st.markdown(
+    """
+    📌 **Νομική Δήλωση**: Η χρήση της εφαρμογής επιτρέπεται μόνο με ρητή γραπτή άδεια της δημιουργού, Παναγιώτας Γιαννιτσοπούλου.
+    Όλα τα πνευματικά δικαιώματα ανήκουν στη Γιαννιτσοπούλου Παναγιώτα. Για άδεια χρήσης:
+    [yiannitsoopanayiota.katanomi@gmail.com](mailto:yiannitsoopanayiota.katanomi@gmail.com)
+    """
+)
